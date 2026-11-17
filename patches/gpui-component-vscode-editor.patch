@@ -1,0 +1,1569 @@
+--- a/src/highlighter/registry.rs
++++ b/src/highlighter/registry.rs
+@@ -3,7 +3,7 @@
+ use serde::{Deserialize, Serialize};
+ use serde_repr::{Deserialize_repr, Serialize_repr};
+ use std::{
+-    collections::HashMap,
++    collections::{BTreeMap, HashMap},
+     ops::Deref,
+     sync::{
+         Arc, LazyLock, Mutex,
+@@ -173,6 +173,10 @@
+     #[serde(rename = "variable.special")]
+     pub variable_special: Option<ThemeStyle>,
+     pub variant: Option<ThemeStyle>,
++    /// Any other capture name, such as `type.builtin`. A name with no style
++    /// of its own falls back to its parent: `type.builtin` to `type`.
++    #[serde(flatten)]
++    pub extra: BTreeMap<String, ThemeStyle>,
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+@@ -291,22 +295,14 @@
+             "variant" => self.variant,
+             _ => None,
+         }
++        .or_else(|| self.extra.get(name).copied())
+         .map(|s| s.into());
+ 
+-        if style.is_some() {
+-            style
+-        } else {
+-            // Fallback `keyword.modifier` to `keyword`
+-            if name.contains(".") {
+-                if let Some(prefix) = name.split(".").next() {
+-                    return self.style(prefix);
+-                }
+-
+-                None
+-            } else {
+-                None
+-            }
+-        }
++        // Fall back to the parent name: `keyword.operator` to `keyword`.
++        style.or_else(|| {
++            let (parent, _) = name.rsplit_once('.')?;
++            self.style(parent)
++        })
+     }
+ 
+     #[inline]
+--- a/src/highlighter/highlighter.rs
++++ b/src/highlighter/highlighter.rs
+@@ -1155,6 +1155,34 @@
+             .into_iter()
+             .map(|item| (item.range, item.name))
+             .collect()
++    }
++
++    /// The byte offset and text of each bracket token in the last parse, in
++    /// document order. Brackets inside strings and comments are part of those
++    /// tokens, not tokens of their own, so they are left out.
++    pub(crate) fn bracket_tokens(&self, brackets: &[&'static str]) -> Vec<(usize, &'static str)> {
++        let Some(tree) = &self.tree else {
++            return Vec::new();
++        };
++        let mut tokens = Vec::new();
++        let mut cursor = tree.walk();
++        'walk: loop {
++            let node = cursor.node();
++            if node.child_count() == 0 && !node.is_named() {
++                if let Some(text) = brackets.iter().find(|text| **text == node.kind()) {
++                    tokens.push((node.start_byte(), *text));
++                }
++            }
++            if cursor.goto_first_child() {
++                continue;
++            }
++            while !cursor.goto_next_sibling() {
++                if !cursor.goto_parent() {
++                    break 'walk;
++                }
++            }
++        }
++        tokens
+     }
+ 
+     /// Returns the syntax highlight styles for a range of text.
+--- a/src/highlighter/wasm_stub.rs
++++ b/src/highlighter/wasm_stub.rs
+@@ -56,6 +56,11 @@
+         Vec::new()
+     }
+ 
++    /// No syntax tree to find bracket tokens in.
++    pub(crate) fn bracket_tokens(&self, _brackets: &[&'static str]) -> Vec<(usize, &'static str)> {
++        Vec::new()
++    }
++
+     pub fn edit_tree(&mut self, _edit: Option<crate::input::InputEdit>, _text: &ropey::Rope) {
+         // No-op in WASM
+     }
+--- a/src/highlighter/languages/javascript/highlights.scm
++++ b/src/highlighter/languages/javascript/highlights.scm
+@@ -147,9 +147,28 @@
+   "&&="
+   "||="
+   "??="
++  "..."
+ ] @operator
+ 
++; Before the generic bracket and keyword rules: for one node, the first
++; matching pattern wins.
++(template_substitution
++  "${" @punctuation.special
++  "}" @punctuation.special)
++
++(ternary_expression ["?" ":"] @operator)
++(new_expression constructor: (identifier) @constructor)
++
+ [
++  "delete"
++  "in"
++  "instanceof"
++  "new"
++  "typeof"
++  "void"
++] @keyword.operator
++
++[
+   "("
+   ")"
+   "["
+@@ -158,10 +177,6 @@
+   "}"
+ ]  @punctuation.bracket
+ 
+-(template_substitution
+-  "${" @punctuation.special
+-  "}" @punctuation.special) @embedded
+-
+ [
+   "as"
+   "async"
+--- a/src/highlighter/languages/javascript/highlights-jsx.scm
++++ b/src/highlighter/languages/javascript/highlights-jsx.scm
+@@ -2,7 +2,12 @@
+ (jsx_closing_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
+ (jsx_self_closing_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
+ 
++(jsx_opening_element (identifier) @tag.component (#match? @tag.component "^[A-Z]"))
++(jsx_closing_element (identifier) @tag.component (#match? @tag.component "^[A-Z]"))
++(jsx_self_closing_element (identifier) @tag.component (#match? @tag.component "^[A-Z]"))
++
+ (jsx_attribute (property_identifier) @attribute)
+-(jsx_opening_element (["<" ">"]) @punctuation.bracket)
+-(jsx_closing_element (["</" ">"]) @punctuation.bracket)
+-(jsx_self_closing_element (["<" "/>"]) @punctuation.bracket)
++(jsx_opening_element (["<" ">"]) @tag.delimiter)
++(jsx_closing_element (["</" ">"]) @tag.delimiter)
++(jsx_self_closing_element (["<" "/>"]) @tag.delimiter)
++(jsx_expression ["{" "}"] @punctuation.section.embedded)
+--- a/src/highlighter/languages/typescript/highlights.scm
++++ b/src/highlighter/languages/typescript/highlights.scm
+@@ -148,9 +148,31 @@
+   "&&="
+   "||="
+   "??="
++  "..."
+ ] @operator
+ 
++; Before the generic bracket and keyword rules: for one node, the first
++; matching pattern wins.
++(template_substitution
++  "${" @punctuation.special
++  "}" @punctuation.special)
++
++(ternary_expression ["?" ":"] @operator)
++(new_expression constructor: (identifier) @constructor)
++(type_annotation ":" @operator)
++(predefined_type) @type.builtin
++
+ [
++  "delete"
++  "in"
++  "instanceof"
++  "keyof"
++  "new"
++  "typeof"
++  "void"
++] @keyword.operator
++
++[
+   "("
+   ")"
+   "["
+@@ -159,10 +181,6 @@
+   "}"
+ ]  @punctuation.bracket
+ 
+-(template_substitution
+-  "${" @punctuation.special
+-  "}" @punctuation.special) @embedded
+-
+ [
+   "as"
+   "async"
+@@ -209,7 +227,6 @@
+ 
+ 
+ (type_identifier) @type
+-(predefined_type) @type.builtin
+ 
+ ((identifier) @type
+  (#match? @type "^[A-Z]"))
+--- a/src/diff/mod.rs
++++ b/src/diff/mod.rs
+@@ -4,6 +4,8 @@
+ mod conflict;
+ mod decoration;
+ mod document;
++mod guides;
++mod overview;
+ mod parser;
+ #[cfg(test)]
+ mod parser_tests;
+@@ -14,6 +16,7 @@
+ pub use conflict::{DiffConflict, DiffConflictResolution};
+ pub use decoration::{DiffDecoration, DiffGutterMarker};
+ pub use document::{DiffFile, DiffFileStatus, DiffLinePosition, DiffLineRange, DiffSide};
++pub use guides::DiffGuideColors;
+ pub use parser::{DiffParseError, DiffParseOptions};
+ pub use presentation::DiffInlineUnit;
+ pub use state::{DiffEvent, DiffState};
+@@ -43,7 +46,8 @@
+ use decoration::{Decorations, GutterMarkers};
+ use presentation::FilePresentation;
+ use selection::{CodeText, SelectionLayer};
+-use state::{DisplayRow, FoldExpansion, LayoutKey, SelectedLines};
++use guides::{ActiveGuides, Guide, GuideShape};
++use state::{Caret, DisplayRow, FoldExpansion, LayoutKey, SelectedLines};
+ 
+ // Private: bindings serve the focused code body only.
+ mod actions {
+@@ -243,6 +247,9 @@
+     change_indicator: DiffChangeIndicator,
+     change_background: bool,
+     change_colors: Option<DiffChangeColors>,
++    line_height_ratio: Option<f32>,
++    guide_colors: Option<DiffGuideColors>,
++    overview_ruler: bool,
+     soft_wrap: bool,
+     header: HeaderSlots,
+     annotations: Rc<Annotations>,
+@@ -276,6 +283,9 @@
+             change_indicator: DiffChangeIndicator::default(),
+             change_background: true,
+             change_colors: None,
++            line_height_ratio: None,
++            guide_colors: None,
++            overview_ruler: false,
+             soft_wrap: false,
+             header: HeaderSlots::default(),
+             annotations: Rc::default(),
+@@ -288,6 +298,26 @@
+             on_line_hover: None,
+         }
+     }
++    /// Sets each row's height to the code font size times `ratio`, rounded to
++    /// whole pixels as VS Code does. Default is 1.6 times, unrounded.
++    pub fn line_height_ratio(mut self, ratio: f32) -> Self {
++        self.line_height_ratio = Some(ratio);
++        self
++    }
++    /// Draws VS Code's indentation and bracket pair guides in these colors.
++    /// They follow the last place the pointer pressed in code, as VS Code's
++    /// follow its cursor. Default is none.
++    pub fn guides(mut self, colors: DiffGuideColors) -> Self {
++        self.guide_colors = Some(colors);
++        self
++    }
++    /// Shows VS Code's diff overview ruler at the right edge: where lines were
++    /// removed and inserted, under a slider for the visible part. Default is
++    /// false.
++    pub fn overview_ruler(mut self, value: bool) -> Self {
++        self.overview_ruler = value;
++        self
++    }
+     /// Shows the original and modified line-number lanes. Default is true.
+     pub fn line_number(mut self, value: bool) -> Self {
+         self.line_number = value;
+@@ -529,9 +559,13 @@
+     state.set_window(window.window_handle().window_id());
+     state.ensure_presentation(cx);
+     let rem = window.rem_size();
+-    let font_size = rem * (f32::from(cx.theme().mono_font_size) / 16.);
++    // The code font size as the code editor uses it: in pixels, not scaled
++    // by the UI font's rem.
++    let font_size = cx.theme().mono_font_size;
+     let font_family = cx.theme().mono_font_family.clone();
+-    let row_height = font_size * 1.6;
++    let row_height = props
++        .line_height_ratio
++        .map_or(font_size * 1.6, |ratio| (font_size * ratio).round());
+     let digits = state
+         .files()
+         .iter()
+@@ -566,6 +600,22 @@
+         state.set_code_width(width);
+     }
+     state.sync_annotations(&props.annotations.items);
++    // Guides sit on column boundaries of the monospaced code font.
++    let space_width = {
++        let font = gpui::Font {
++            family: font_family.clone(),
++            ..Default::default()
++        };
++        let text_system = window.text_system();
++        text_system
++            .advance(text_system.resolve_font(&font), font_size, ' ')
++            .map_or(font_size * 0.6, |advance| advance.width)
++    };
++    let active_guides = state.caret().and_then(|caret| {
++        let presentation = state.presentations().get(caret.file)?.as_ref()?;
++        let guides = presentation.guides(caret.side);
++        Some((caret, guides.active(caret.line, caret.column)))
++    });
+     // Rows always fit the body. Unwrapped code scrolls inside each code cell
+     // instead (see `code_line`), so line numbers stay put and both split
+     // columns stay in view however long a line is.
+@@ -575,6 +625,35 @@
+     } else {
+         content_width
+     };
++    let ruler = (props.overview_ruler && !state.rows().is_empty()).then(|| {
++        let theme = cx.theme();
++        // `diffEditorOverview.*Foreground` default to the inline change
++        // colors at twice their opacity.
++        let doubled = |color: Hsla| Hsla {
++            a: (color.a * 2.).min(1.),
++            ..color
++        };
++        let (removed, inserted) = match props.change_colors {
++            Some(colors) => (colors.removed_text, colors.inserted_text),
++            None => (theme.danger.opacity(0.3), theme.success.opacity(0.3)),
++        };
++        overview::render_overview_ruler(
++            overview::Zones::new(state.rows()),
++            overview::RulerColors {
++                removed: doubled(removed),
++                inserted: doubled(inserted),
++                // VS Code's `.vs-dark .diffOverview` background.
++                background: gpui::hsla(0., 0., 1., 0.01),
++                slider: theme.scrollbar_thumb,
++                slider_hover: theme.scrollbar_thumb_hover,
++                // `scrollbarSlider.activeBackground`.
++                slider_active: gpui::rgba(0xBFBFBF66).into(),
++            },
++            cx.entity(),
++            state.list().clone(),
++            state.ruler_drag().clone(),
++        )
++    });
+     let code = Rc::new(CodePresentation {
+         files: state.files().to_vec(),
+         presentations: state.presentations().to_vec(),
+@@ -596,6 +675,9 @@
+         change_indicator: props.change_indicator,
+         change_background: props.change_background,
+         change_colors: props.change_colors,
++        guide_colors: props.guide_colors,
++        space_width,
++        active_guides,
+         soft_wrap,
+         header: props.header,
+         annotations: props.annotations.clone(),
+@@ -815,7 +897,15 @@
+         .text_sm()
+         .border_1()
+         .border_color(cx.theme().border)
+-        .child(body)
++        .child(
++            h_flex()
++                .flex_1()
++                .min_h_0()
++                .min_w_0()
++                .items_stretch()
++                .child(body)
++                .children(ruler),
++        )
+         .refine_style(&props.style)
+         .into_any_element()
+ }
+@@ -854,6 +944,11 @@
+     change_indicator: DiffChangeIndicator,
+     change_background: bool,
+     change_colors: Option<DiffChangeColors>,
++    guide_colors: Option<DiffGuideColors>,
++    /// The advance of a space in the code font: one column.
++    space_width: Pixels,
++    /// The guides following the caret, on the caret's side of its file.
++    active_guides: Option<(Caret, ActiveGuides)>,
+     soft_wrap: bool,
+     header: HeaderSlots,
+     annotations: Rc<Annotations>,
+@@ -1393,7 +1488,13 @@
+                     .items_center()
+                     .justify_end()
+                     .text_size(code.font_size)
+-                    .text_color(cx.theme().muted_foreground)
++                    .text_color(
++                        cx.theme()
++                            .highlight_theme
++                            .style
++                            .editor_line_number
++                            .unwrap_or(cx.theme().muted_foreground),
++                    )
+                     .hover(|this| this.text_color(cx.theme().foreground))
+                     .role(gpui::accesskit::Role::Button)
+                     .aria_label(
+@@ -1729,7 +1830,25 @@
+     // A block container gives wrapped text a definite width to break at.
+     // Unwrapped, every line is as wide as the widest one, so all cells share
+     // one scroll range and clamping the shared offset agrees across them.
++    let guides = code
++        .guide_colors
++        .as_ref()
++        .and_then(|colors| {
++            let presentation = code.presentations.get(file)?.as_ref()?;
++            let active = code
++                .active_guides
++                .as_ref()
++                .filter(|(caret, _)| caret.file == file && caret.side == text_side)
++                .map(|(_, active)| active);
++            Some(
++                presentation
++                    .guides(text_side)
++                    .line_guides(text_ix, active, colors),
++            )
++        })
++        .unwrap_or_default();
+     let text = div()
++        .relative()
+         .map(|this| {
+             if code.soft_wrap {
+                 this.w_full()
+@@ -1740,6 +1859,8 @@
+                     .min_w(code.code_width)
+             }
+         })
++        // Before the text, so they paint under it as VS Code's overlay does.
++        .children(guides.into_iter().map(|guide| render_guide(guide, &code)))
+         .children(ranges.into_iter().enumerate().map(|(chunk_ix, range)| {
+             CodeText::new(
+                 ("code", chunk_ix).into(),
+@@ -1895,6 +2016,27 @@
+                     )
+                     .to_string(),
+                 )
++                .when(code.guide_colors.is_some(), |this| {
++                    let state = code.state.clone();
++                    let geometry = code.geometry.clone();
++                    let space_width = code.space_width;
++                    let width = unicode_width::UnicodeWidthStr::width(source_line.display().as_str()) as u32;
++                    this.on_mouse_down(MouseButton::Left, move |event, _, cx| {
++                        let Some(left) = geometry.borrow().line_left(file, text_side, text_ix)
++                        else {
++                            return;
++                        };
++                        // The nearest column boundary, as a click places the cursor.
++                        let column = ((event.position.x - left) / space_width).round().max(0.);
++                        let caret = Caret {
++                            file,
++                            side: text_side,
++                            line: text_ix,
++                            column: (column as u32).min(width),
++                        };
++                        state.update(cx, |state, cx| state.set_caret(caret, cx));
++                    })
++                })
+                 .when_some(code.on_line_click.clone(), |this, handler| {
+                     let position = position.clone();
+                     this.on_click(move |event, window, cx| {
+@@ -1914,6 +2056,21 @@
+         .into_any_element()
+ }
+ 
++/// A guide as VS Code draws it: a one-pixel line at the left edge of its
++/// column, or along the row's top or bottom edge up to `end`.
++fn render_guide(guide: Guide, code: &CodePresentation) -> gpui::Div {
++    let line = div()
++        .absolute()
++        .left(code.space_width * guide.column as f32)
++        .bg(guide.color);
++    let length = code.space_width * (guide.end - guide.column) as f32;
++    match guide.shape {
++        GuideShape::Vertical => line.top_0().bottom_0().w(px(1.)),
++        GuideShape::Top => line.top_0().w(length).h(px(1.)),
++        GuideShape::Bottom => line.bottom_0().w(length).h(px(1.)),
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ fn line_extras(
+     file: usize,
+--- a/src/diff/state.rs
++++ b/src/diff/state.rs
+@@ -13,6 +13,7 @@
+ };
+ use gpui_base::{TextSelection, TextSelectionContentKey, TextSelectionEvent, TextSelectionHandle};
+ 
++use super::overview::RulerDrag;
+ use super::{
+     DiffAnnotation, DiffConflictResolution, DiffFile, DiffFileStatus, DiffInlineUnit,
+     DiffLinePosition, DiffLineRange, DiffMode, DiffSide,
+@@ -199,6 +200,16 @@
+     }
+ }
+ 
++/// VS Code's cursor, which the diff has none of otherwise: where the pointer
++/// last pressed in code, as a visible column of a source line.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct Caret {
++    pub file: usize,
++    pub side: DiffSide,
++    pub line: usize,
++    pub column: u32,
++}
++
+ /// Retained focus, viewport, context expansion and selection for a
+ /// [`super::Diff`] showing one or more files of a patch.
+ ///
+@@ -229,6 +240,8 @@
+     selection_anchor: Option<DiffLinePosition>,
+     selection_cursor: Option<DiffLinePosition>,
+     selecting: bool,
++    caret: Option<Caret>,
++    ruler_drag: RulerDrag,
+     presentation_options: PresentationOptions,
+     syntax_highlighter: Option<DiffSyntaxHighlighter>,
+     presentations: Vec<Option<Arc<FilePresentation>>>,
+@@ -360,6 +373,8 @@
+             selection_anchor: None,
+             selection_cursor: None,
+             selecting: false,
++            caret: None,
++            ruler_drag: RulerDrag::default(),
+             presentation_options: PresentationOptions {
+                 inline_unit: Some(DiffInlineUnit::Word),
+                 inline_max_line_length: 1000,
+@@ -579,6 +594,19 @@
+     pub(crate) fn geometry(&self) -> &Rc<RefCell<SelectionGeometry>> {
+         &self.geometry
+     }
++    /// Where the pointer last pressed in code; the guides follow it.
++    pub(crate) fn caret(&self) -> Option<Caret> {
++        self.caret
++    }
++    pub(crate) fn set_caret(&mut self, caret: Caret, cx: &mut Context<Self>) {
++        if self.caret != Some(caret) {
++            self.caret = Some(caret);
++            cx.notify();
++        }
++    }
++    pub(crate) fn ruler_drag(&self) -> &RulerDrag {
++        &self.ruler_drag
++    }
+     pub(crate) fn presentations(&self) -> &[Option<Arc<FilePresentation>>] {
+         &self.presentations
+     }
+@@ -628,6 +656,7 @@
+         self.selection_anchor = None;
+         self.selection_cursor = None;
+         self.selecting = false;
++        self.caret = None;
+         self.geometry.borrow_mut().clear();
+         self.rebuild(true);
+         self.horizontal_scroll.set_offset(point(px(0.), px(0.)));
+--- a/src/diff/presentation.rs
++++ b/src/diff/presentation.rs
+@@ -1,13 +1,18 @@
+ //! Presentation prepared on a background thread: syntax captures, as
+ //! theme-independent highlight names or an application highlighter's styles,
+-//! and inline changes between paired lines.
++//! inline changes between paired lines, and each side's guides.
+ use std::{collections::HashMap, ops::Range, sync::Arc};
+ 
+ use gpui::{HighlightStyle, SharedString};
+ use gpui_base::input::HighlightStyleResolver;
+ use similar::{ChangeTag, TextDiff};
++use unicode_width::UnicodeWidthStr as _;
+ 
+-use super::{DiffFile, DiffSide, document::SourceLine};
++use super::{
++    DiffFile, DiffSide,
++    document::SourceLine,
++    guides::{BRACKET_TOKENS, Bracket, SideGuides},
++};
+ use crate::{Rope, highlighter::SyntaxHighlighter};
+ 
+ /// The unit inline changes are compared and emphasized in.
+@@ -58,6 +63,7 @@
+     names: Vec<SharedString>,
+     syntax: [LineSpans<SyntaxPaint>; 2],
+     inline: [LineSpans<()>; 2],
++    guides: [SideGuides; 2],
+ }
+ 
+ /// Byte ranges relative to each line's source start, with a payload.
+@@ -108,37 +114,51 @@
+         let mut presentation = Self::default();
+         let mut name_ixs = HashMap::<SharedString, u16>::new();
+         for side in [DiffSide::Original, DiffSide::Modified] {
+-            let per_line = syntax_spans(
++            let (per_line, brackets) = syntax_spans(
+                 file,
+                 side,
+                 options.syntax_max_line_length,
+                 &mut |language, text| match custom {
+                     // A range that splits a character, such as one counted in
+                     // characters rather than bytes, cannot be painted.
+-                    Some(highlight) => highlight(language, text)
+-                        .into_iter()
+-                        .filter(|(range, _)| {
+-                            text.is_char_boundary(range.start) && text.is_char_boundary(range.end)
+-                        })
+-                        .map(|(range, style)| (range, SyntaxPaint::Style(style)))
+-                        .collect(),
+-                    None => highlighters
+-                        .entry(language.clone())
+-                        .or_insert_with(|| SyntaxHighlighter::new(language))
+-                        .capture_names(&Rope::from_str(text))
+-                        .into_iter()
+-                        .map(|(range, name)| {
+-                            let next = name_ixs.len().min(u16::MAX as usize) as u16;
+-                            let ix = *name_ixs.entry(name.clone()).or_insert_with(|| {
+-                                presentation.names.push(name.clone());
+-                                next
+-                            });
+-                            (range, SyntaxPaint::Name(ix))
+-                        })
+-                        .collect(),
++                    // The application's highlighter gives no syntax tree to
++                    // find brackets in.
++                    Some(highlight) => (
++                        highlight(language, text)
++                            .into_iter()
++                            .filter(|(range, _)| {
++                                text.is_char_boundary(range.start)
++                                    && text.is_char_boundary(range.end)
++                            })
++                            .map(|(range, style)| (range, SyntaxPaint::Style(style)))
++                            .collect(),
++                        Vec::new(),
++                    ),
++                    None => {
++                        let highlighter = highlighters
++                            .entry(language.clone())
++                            .or_insert_with(|| SyntaxHighlighter::new(language));
++                        let spans = highlighter
++                            .capture_names(&Rope::from_str(text))
++                            .into_iter()
++                            .map(|(range, name)| {
++                                let next = name_ixs.len().min(u16::MAX as usize) as u16;
++                                let ix = *name_ixs.entry(name.clone()).or_insert_with(|| {
++                                    presentation.names.push(name.clone());
++                                    next
++                                });
++                                (range, SyntaxPaint::Name(ix))
++                            })
++                            .collect();
++                        (spans, highlighter.bracket_tokens(&BRACKET_TOKENS))
++                    }
+                 },
+             );
+             presentation.syntax[side as usize] = LineSpans::from_lines(per_line);
++            presentation.guides[side as usize] = SideGuides::new(
++                file.lines(side).iter().map(|line| line.display().as_str()),
++                brackets,
++            );
+         }
+         if let Some(unit) = options.inline_unit {
+             presentation.inline = inline_changes(file, unit, options.inline_max_line_length);
+@@ -170,6 +190,11 @@
+             .collect()
+     }
+ 
++    /// The indentation and bracket structure of one side, for its guides.
++    pub(crate) fn guides(&self, side: DiffSide) -> &SideGuides {
++        &self.guides[side as usize]
++    }
++
+     /// Changed runs within one line, as display ranges.
+     pub(crate) fn inline_changes<'a>(
+         &'a self,
+@@ -186,22 +211,27 @@
+ 
+ /// Parses each hunk of one side independently, so an unterminated comment or
+ /// string in one hunk cannot affect the next.
++/// Also returns the side's bracket tokens, by line and display column.
+ fn syntax_spans(
+     file: &DiffFile,
+     side: DiffSide,
+     max_line_length: usize,
+-    highlight: &mut dyn FnMut(&SharedString, &str) -> Vec<(Range<usize>, SyntaxPaint)>,
+-) -> Vec<Vec<(Range<u32>, SyntaxPaint)>> {
++    highlight: &mut dyn FnMut(
++        &SharedString,
++        &str,
++    ) -> (Vec<(Range<usize>, SyntaxPaint)>, Vec<(usize, &'static str)>),
++) -> (Vec<Vec<(Range<u32>, SyntaxPaint)>>, Vec<Bracket>) {
+     let lines = file.lines(side);
+     let mut per_line: Vec<Vec<(Range<u32>, SyntaxPaint)>> =
+         (0..lines.len()).map(|_| Vec::new()).collect();
++    let mut brackets = Vec::new();
+     let language = match (file.language_override(), file.side_path(side)) {
+         (Some(language), _) => language.clone(),
+         (None, Some(path)) => detected_language(path),
+-        (None, None) => return per_line,
++        (None, None) => return (per_line, brackets),
+     };
+     if language.as_str() == "text" || lines.is_empty() {
+-        return per_line;
++        return (per_line, brackets);
+     }
+     let ranges = if file.hunks().is_empty() {
+         vec![0..lines.len()]
+@@ -213,7 +243,20 @@
+         let base = lines[range.start].source().start;
+         let text = &source[base..lines[range.end - 1].source().end];
+         let hunk_lines = &lines[range.clone()];
+-        for (capture, paint) in highlight(&language, text) {
++        let (captures, tokens) = highlight(&language, text);
++        brackets.extend(tokens.into_iter().map(|(offset, text)| {
++            let offset = base + offset;
++            let ix = hunk_lines.partition_point(|line| line.source().end <= offset);
++            let line = &hunk_lines[ix];
++            let start = offset - line.source().start;
++            let display = line.display_range(start..start).start;
++            Bracket {
++                line: range.start + ix,
++                column: line.display()[..display].width() as u32,
++                text,
++            }
++        }));
++        for (capture, paint) in captures {
+             let capture = capture.start + base..capture.end + base;
+             let first = hunk_lines.partition_point(|line| line.source().end <= capture.start);
+             for (offset, line) in hunk_lines[first..].iter().enumerate() {
+@@ -235,7 +278,7 @@
+             }
+         }
+     }
+-    per_line
++    (per_line, brackets)
+ }
+ 
+ /// Compares each deleted line with the added line paired with it.
+--- a/src/diff/selection.rs
++++ b/src/diff/selection.rs
+@@ -64,6 +64,18 @@
+                 (Some(key), left, widest.max(run.bounds.right() - left))
+             })
+             .2
++    }
++    /// Where a painted line's text starts, in window coordinates.
++    pub fn line_left(&self, file: usize, side: DiffSide, line_ix: usize) -> Option<Pixels> {
++        self.runs
++            .iter()
++            .find(|run| {
++                run.file == file
++                    && run.side == side
++                    && run.line_ix == line_ix
++                    && run.display_range.start == 0
++            })
++            .map(|run| run.bounds.left())
+     }
+     /// Each painted text run's side and window bounds.
+     #[cfg(test)]
+--- /dev/null
++++ b/src/diff/guides.rs
+@@ -0,0 +1,545 @@
++//! VS Code's indentation and bracket pair guides for one side of a file, as
++//! drawn with `editor.guides.indentation`, `editor.guides.bracketPairs: true`
++//! and the default `editor.guides.bracketPairsHorizontal: "active"`.
++//!
++//! Follows `guidesTextModelPart.ts` and `indentGuides.ts` of VS Code. Columns
++//! are visible columns counted from 0, in display cells: the display text has
++//! its tabs expanded already, to VS Code's default tab size of 4.
++
++use gpui::Hsla;
++use unicode_width::UnicodeWidthStr as _;
++
++/// `editor.indentSize`, which defaults to the tab size, 4.
++const INDENT_SIZE: u32 = 4;
++
++/// The guide colors, which VS Code takes from the theme.
++#[derive(Clone, Debug, PartialEq)]
++pub struct DiffGuideColors {
++    /// `editorIndentGuide.background1`.
++    pub indent: Hsla,
++    /// `editorIndentGuide.activeBackground1`: the block holding the cursor.
++    pub indent_active: Hsla,
++    /// `editorBracketHighlight.foreground1` onwards, cycled by nesting level.
++    /// The pair holding the cursor uses them as they are, the others at 30%
++    /// opacity.
++    pub brackets: Vec<Hsla>,
++}
++
++/// A bracket token, found by the syntax tree so that brackets in strings and
++/// comments are left out.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct Bracket {
++    pub line: usize,
++    pub column: u32,
++    pub text: &'static str,
++}
++
++/// The opening and closing brackets of JavaScript-like languages; `${` opens
++/// a template substitution.
++pub(crate) const BRACKET_TOKENS: [&str; 7] = ["(", ")", "[", "]", "{", "}", "${"];
++
++fn closes(open: &str, close: &str) -> bool {
++    matches!(
++        (open, close),
++        ("(", ")") | ("[", "]") | ("{", "}") | ("${", "}")
++    )
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++struct Position {
++    line: usize,
++    column: u32,
++}
++
++#[derive(Debug)]
++struct BracketPair {
++    open: Position,
++    /// The column just after the opening bracket.
++    open_end: u32,
++    close: Position,
++    /// How many pairs enclose this one.
++    level: u32,
++    /// Where the vertical guide runs.
++    guide: u32,
++    /// The closing bracket follows other text on its line, so the guide runs
++    /// through that line and turns along its bottom.
++    text_before_close: bool,
++}
++
++/// The guides' shape within one line's row.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum GuideShape {
++    /// A line down the left edge of `column`.
++    Vertical,
++    /// A line along the row's top from `column` to `end`.
++    Top,
++    /// A line along the row's bottom from `column` to `end`.
++    Bottom,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub(crate) struct Guide {
++    pub column: u32,
++    pub end: u32,
++    pub shape: GuideShape,
++    pub color: Hsla,
++}
++
++/// The guides that follow the cursor.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub(crate) struct ActiveGuides {
++    /// Lines of the indented block holding the cursor, and its level.
++    indent: Option<(std::ops::RangeInclusive<usize>, u32)>,
++    /// The innermost bracket pair holding the cursor.
++    pair: Option<usize>,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct SideGuides {
++    /// The number of indent guides on each line.
++    levels: Vec<u32>,
++    /// Pairs in the order of their opening brackets.
++    pairs: Vec<BracketPair>,
++    /// `crossing[starts[line]..starts[line + 1]]` are the pairs whose
++    /// vertical guide runs through `line`.
++    starts: Vec<u32>,
++    crossing: Vec<u32>,
++}
++
++/// The column of the first non-whitespace character, or `None` for a blank
++/// line.
++fn indentation(display: &str) -> Option<u32> {
++    let content = display.trim_start();
++    (!content.is_empty()).then(|| display[..display.len() - content.len()].width() as u32)
++}
++
++impl SideGuides {
++    /// `lines` are the display texts of one side; `brackets` its bracket
++    /// tokens in document order.
++    pub(crate) fn new<'a>(
++        lines: impl IntoIterator<Item = &'a str>,
++        brackets: impl IntoIterator<Item = Bracket>,
++    ) -> Self {
++        let indents: Vec<Option<u32>> = lines.into_iter().map(indentation).collect();
++        let levels = indent_levels(&indents);
++        let mut pairs = Vec::new();
++        let mut open: Vec<Bracket> = Vec::new();
++        for bracket in brackets {
++            if !matches!(bracket.text, ")" | "]" | "}") {
++                open.push(bracket);
++                continue;
++            }
++            // An unmatched closing bracket is skipped; brackets left open
++            // inside a matched pair are dropped with it.
++            let Some(depth) = open
++                .iter()
++                .rposition(|opening| closes(opening.text, bracket.text))
++            else {
++                continue;
++            };
++            let opening = open[depth];
++            open.truncate(depth);
++            pairs.push(pair(&indents, opening, bracket, depth as u32));
++        }
++        pairs.sort_by_key(|pair| pair.open);
++
++        let mut per_line = vec![Vec::new(); indents.len()];
++        for (ix, pair) in pairs.iter().enumerate() {
++            let last = pair.close.line + pair.text_before_close as usize;
++            for line in pair.open.line + 1..last.min(indents.len()) {
++                per_line[line].push(ix as u32);
++            }
++        }
++        let mut starts = Vec::with_capacity(per_line.len() + 1);
++        starts.push(0);
++        let mut crossing = Vec::new();
++        for line in per_line {
++            crossing.extend(line);
++            starts.push(crossing.len() as u32);
++        }
++        Self {
++            levels,
++            pairs,
++            starts,
++            crossing,
++        }
++    }
++
++    fn crossing(&self, line: usize) -> &[u32] {
++        match (self.starts.get(line), self.starts.get(line + 1)) {
++            (Some(start), Some(end)) => &self.crossing[*start as usize..*end as usize],
++            _ => &[],
++        }
++    }
++
++    /// The guides following a cursor at `column` of `line`.
++    pub(crate) fn active(&self, line: usize, column: u32) -> ActiveGuides {
++        let cursor = Position { line, column };
++        // The last pair, in opening order, that strictly contains the cursor
++        // is the innermost one.
++        let pair = self.pairs.iter().rposition(|pair| {
++            let end = Position {
++                line: pair.close.line,
++                column: pair.close.column + 1,
++            };
++            pair.open < cursor && cursor < end
++        });
++        ActiveGuides {
++            indent: self.active_indent(line),
++            pair,
++        }
++    }
++
++    /// VS Code's `getActiveIndentGuide`: the block around `line`, or the one
++    /// it opens or closes.
++    fn active_indent(&self, line: usize) -> Option<(std::ops::RangeInclusive<usize>, u32)> {
++        let level = |line: Option<usize>| -> i64 {
++            line.and_then(|line| self.levels.get(line))
++                .map_or(-1, |level| *level as i64)
++        };
++        let initial = level(Some(line));
++        if initial < 0 {
++            return None;
++        }
++        let (mut start, mut end, indent, mut up, mut down);
++        if level(Some(line + 1)) == initial + 1 {
++            // The line opens a block: its body is the active one.
++            (start, end, indent, up, down) = (line + 1, line + 1, initial + 1, false, true);
++        } else if level(line.checked_sub(1)) == initial + 1 {
++            // The line closes a block.
++            (start, end, indent, up, down) = (line - 1, line - 1, initial + 1, true, false);
++        } else if initial == 0 {
++            return None;
++        } else {
++            (start, end, indent, up, down) = (line, line, initial, true, true);
++            if level(line.checked_sub(1)) >= indent {
++                start = line - 1;
++            } else {
++                up = false;
++            }
++            if level(Some(line + 1)) >= indent {
++                end = line + 1;
++            } else {
++                down = false;
++            }
++        }
++        let mut distance = 2;
++        while up || down {
++            if up {
++                match line.checked_sub(distance) {
++                    Some(above) if level(Some(above)) >= indent => start = above,
++                    _ => up = false,
++                }
++            }
++            if down {
++                if level(Some(line + distance)) >= indent {
++                    end = line + distance;
++                } else {
++                    down = false;
++                }
++            }
++            distance += 1;
++        }
++        Some((start..=end, indent as u32))
++    }
++
++    /// The guides of one line, in drawing order.
++    pub(crate) fn line_guides(
++        &self,
++        line: usize,
++        active: Option<&ActiveGuides>,
++        colors: &DiffGuideColors,
++    ) -> Vec<Guide> {
++        let active_pair = active.and_then(|active| active.pair);
++        let bracket_color = |ix: usize| {
++            let color = colors.brackets.get(self.pairs[ix].level as usize % colors.brackets.len().max(1));
++            let color = color.copied().unwrap_or_default();
++            if active_pair == Some(ix) {
++                color
++            } else {
++                color.opacity(0.3)
++            }
++        };
++        // Sorted by column; a guide under a one-line pair sorts first.
++        let mut brackets: Vec<(i64, Guide)> = self
++            .crossing(line)
++            .iter()
++            .map(|ix| {
++                let pair = &self.pairs[*ix as usize];
++                let guide = Guide {
++                    column: pair.guide,
++                    end: pair.guide,
++                    shape: GuideShape::Vertical,
++                    color: bracket_color(*ix as usize),
++                };
++                (pair.guide as i64, guide)
++            })
++            .collect();
++        if let Some(ix) = active_pair {
++            let pair = &self.pairs[ix];
++            let color = bracket_color(ix);
++            if pair.open.line == pair.close.line {
++                if line == pair.open.line {
++                    let guide = Guide {
++                        column: pair.open_end,
++                        end: pair.close.column,
++                        shape: GuideShape::Bottom,
++                        color,
++                    };
++                    brackets.push((-1, guide));
++                }
++            } else {
++                if line == pair.open.line && pair.open.column > pair.guide {
++                    let guide = Guide {
++                        column: pair.guide,
++                        end: pair.open.column,
++                        shape: GuideShape::Bottom,
++                        color,
++                    };
++                    brackets.push((pair.guide as i64, guide));
++                }
++                if line == pair.close.line && pair.close.column > pair.guide {
++                    let guide = Guide {
++                        column: pair.guide,
++                        end: pair.close.column,
++                        shape: if pair.text_before_close {
++                            GuideShape::Bottom
++                        } else {
++                            GuideShape::Top
++                        },
++                        color,
++                    };
++                    brackets.push((pair.guide as i64, guide));
++                }
++            }
++        }
++        brackets.sort_by_key(|(key, _)| *key);
++
++        // Lines with a bracket guide never show the active indent guide.
++        let active_indent = active
++            .and_then(|active| active.indent.clone())
++            .filter(|_| brackets.is_empty());
++        let mut guides = Vec::with_capacity(brackets.len() + 4);
++        let mut queue = brackets.into_iter().peekable();
++        for level in 1..=self.levels.get(line).copied().unwrap_or(0) {
++            let column = (level - 1) * INDENT_SIZE;
++            while let Some((_, guide)) = queue.next_if(|(key, _)| *key < column as i64) {
++                guides.push(guide);
++            }
++            let covered = queue.peek().is_some_and(|(_, guide)| {
++                guide.shape == GuideShape::Vertical && guide.column == column
++            });
++            if !covered {
++                let is_active = active_indent
++                    .as_ref()
++                    .is_some_and(|(lines, active)| lines.contains(&line) && *active == level);
++                guides.push(Guide {
++                    column,
++                    end: column,
++                    shape: GuideShape::Vertical,
++                    color: if is_active {
++                        colors.indent_active
++                    } else {
++                        colors.indent
++                    },
++                });
++            }
++        }
++        guides.extend(queue.map(|(_, guide)| guide));
++        guides
++    }
++}
++
++fn pair(indents: &[Option<u32>], open: Bracket, close: Bracket, level: u32) -> BracketPair {
++    let open_position = Position {
++        line: open.line,
++        column: open.column,
++    };
++    let close_position = Position {
++        line: close.line,
++        column: close.column,
++    };
++    // The least indentation of the lines after the opening bracket's, up to
++    // and including the closing bracket's.
++    let min_indent = indents
++        .get(open.line + 1..=close.line)
++        .into_iter()
++        .flatten()
++        .flatten()
++        .min()
++        .copied()
++        .unwrap_or(u32::MAX);
++    let text_before_close = indents
++        .get(close.line)
++        .copied()
++        .flatten()
++        .is_some_and(|indent| indent < close.column);
++    BracketPair {
++        open: open_position,
++        open_end: open.column + open.text.len() as u32,
++        close: close_position,
++        level,
++        guide: open.column.min(close.column).min(min_indent),
++        text_before_close,
++    }
++}
++
++/// VS Code's `getLinesIndentGuides`: a line's indentation in levels,
++/// rounded up; a blank line takes its level from the lines around it.
++fn indent_levels(indents: &[Option<u32>]) -> Vec<u32> {
++    let mut below = vec![None; indents.len()];
++    let mut next = None;
++    for (line, indent) in indents.iter().enumerate().rev() {
++        below[line] = next;
++        if indent.is_some() {
++            next = *indent;
++        }
++    }
++    let mut above = None;
++    indents
++        .iter()
++        .zip(below)
++        .map(|(indent, below)| match (indent, above, below) {
++            (Some(indent), _, _) => {
++                above = Some(*indent);
++                indent.div_ceil(INDENT_SIZE)
++            }
++            (None, Some(above), Some(below)) if above < below => 1 + above / INDENT_SIZE,
++            (None, Some(above), Some(below)) if above == below => below.div_ceil(INDENT_SIZE),
++            (None, Some(_), Some(below)) => 1 + below / INDENT_SIZE,
++            // At the top or bottom of the file.
++            (None, _, _) => 0,
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn colors() -> DiffGuideColors {
++        DiffGuideColors {
++            indent: gpui::rgb(0x505037).into(),
++            indent_active: gpui::rgb(0x707057).into(),
++            brackets: vec![
++                gpui::rgb(0xFFD700).into(),
++                gpui::rgb(0xDA70D6).into(),
++                gpui::rgb(0x179FFF).into(),
++            ],
++        }
++    }
++
++    /// Brackets found by scanning, for tests whose code has no strings.
++    fn guides(code: &str) -> SideGuides {
++        let lines: Vec<&str> = code.lines().collect();
++        let brackets = lines.iter().enumerate().flat_map(|(line, text)| {
++            text.char_indices().filter_map(move |(ix, ch)| {
++                let text = BRACKET_TOKENS.into_iter().find(|token| token.starts_with(ch))?;
++                Some(Bracket {
++                    line,
++                    column: ix as u32,
++                    text,
++                })
++            })
++        });
++        SideGuides::new(lines.iter().copied(), brackets.collect::<Vec<_>>())
++    }
++
++    fn shapes(guides: &[Guide]) -> Vec<(u32, u32, GuideShape)> {
++        guides
++            .iter()
++            .map(|guide| (guide.column, guide.end, guide.shape))
++            .collect()
++    }
++
++    #[test]
++    fn blank_lines_take_the_level_of_the_block_they_sit_in() {
++        let indents = [Some(0), Some(4), None, Some(4), None, Some(0)];
++        assert_eq!(indent_levels(&indents), [0, 1, 1, 1, 1, 0]);
++        // Two-space code with indent size 4 still gets one guide per step.
++        let indents = [Some(0), Some(2), Some(4), Some(2), Some(0)];
++        assert_eq!(indent_levels(&indents), [0, 1, 1, 1, 0]);
++    }
++
++    #[test]
++    fn a_bracket_guide_replaces_the_indent_guide_at_its_column() {
++        let code = "if (x) {\n    a();\n}";
++        let side = guides(code);
++        // `{` at column 7 and `}` at 0, so the pair's guide runs at column 0,
++        // where the indent guide would be.
++        let line = side.line_guides(1, None, &colors());
++        assert_eq!(shapes(&line), [(0, 0, GuideShape::Vertical)]);
++        assert_eq!(line[0].color, colors().brackets[0].opacity(0.3));
++        // No vertical guide on the opening line, nor on a closing line that
++        // starts with the bracket.
++        assert!(side.line_guides(0, None, &colors()).is_empty());
++        assert!(side.line_guides(2, None, &colors()).is_empty());
++    }
++
++    #[test]
++    fn the_pair_holding_the_cursor_turns_along_its_bracket_lines() {
++        let side = guides("x = {\n    a: 1,\n};");
++        let active = side.active(1, 5);
++        let colors = colors();
++        // Opening line: along the bottom from the guide to the bracket.
++        assert_eq!(
++            shapes(&side.line_guides(0, Some(&active), &colors)),
++            [(0, 4, GuideShape::Bottom)]
++        );
++        // The guide is opaque while active.
++        let middle = side.line_guides(1, Some(&active), &colors);
++        assert_eq!(shapes(&middle), [(0, 0, GuideShape::Vertical)]);
++        assert_eq!(middle[0].color, colors.brackets[0]);
++        // `}` sits on the guide, so no turn is needed.
++        assert!(side.line_guides(2, Some(&active), &colors).is_empty());
++    }
++
++    #[test]
++    fn a_closing_bracket_after_text_extends_the_guide_through_its_line() {
++        let side = guides("x = [\n    1,\n    2];");
++        let active = side.active(1, 5);
++        let colors = colors();
++        // The guide runs at the least indentation inside, column 4; the indent
++        // guide keeps column 0.
++        assert_eq!(
++            shapes(&side.line_guides(1, Some(&active), &colors)),
++            [(0, 0, GuideShape::Vertical), (4, 4, GuideShape::Vertical)]
++        );
++        // Text precedes `]`: the guide runs through its line and turns along
++        // the bottom to the bracket.
++        assert_eq!(
++            shapes(&side.line_guides(2, Some(&active), &colors)),
++            [
++                (0, 0, GuideShape::Vertical),
++                (4, 4, GuideShape::Vertical),
++                (4, 5, GuideShape::Bottom)
++            ]
++        );
++    }
++
++    #[test]
++    fn a_one_line_pair_holding_the_cursor_is_underlined() {
++        let side = guides("call(a, b);");
++        let active = side.active(0, 6);
++        assert_eq!(
++            shapes(&side.line_guides(0, Some(&active), &colors())),
++            [(5, 9, GuideShape::Bottom)]
++        );
++        // Right before the opening bracket is outside the pair.
++        assert_eq!(side.active(0, 4).pair, None);
++    }
++
++    #[test]
++    fn the_active_indent_guide_follows_the_block_of_the_cursor() {
++        let code = "a\n    b\n    c\nd\n";
++        let side = guides(code);
++        let colors = colors();
++        // On `a`, which opens the block, the block's guide lights up.
++        let active = side.active(0, 0);
++        assert_eq!(active.indent, Some((1..=2, 1)));
++        let guide = side.line_guides(2, Some(&active), &colors);
++        assert_eq!(guide[0].color, colors.indent_active);
++        // On `d`, which closes the block, the same block lights up.
++        assert_eq!(side.active(3, 0).indent, Some((1..=2, 1)));
++    }
++}
+--- /dev/null
++++ b/src/diff/overview.rs
+@@ -0,0 +1,239 @@
++//! VS Code's diff overview ruler: a 30-pixel strip at the right edge with a
++//! lane of removed lines and a lane of inserted lines, under a slider that
++//! shows and moves the visible part. Follows `overviewRulerFeature.ts`,
++//! `overviewZoneManager.ts` and `scrollbarState.ts`.
++
++use std::{cell::Cell, ops::Range, rc::Rc};
++
++use gpui::{
++    App, Bounds, Entity, Hitbox, HitboxBehavior, Hsla, IntoElement, ListState, MouseButton,
++    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollEvent, Styled as _,
++    canvas, fill, point, px, size,
++};
++use gpui_base::ScrollbarHandle as _;
++
++use super::{DiffState, state::DisplayRow};
++
++/// `OverviewRulerFeature.ONE_OVERVIEW_WIDTH`; the ruler is two lanes wide.
++const LANE_WIDTH: Pixels = px(15.);
++pub(crate) const RULER_WIDTH: Pixels = px(30.);
++/// `OverviewZoneManager`'s `MINIMUM_HEIGHT`.
++const MINIMUM_ZONE_HEIGHT: Pixels = px(4.);
++/// `ScrollbarState`'s `MINIMUM_SLIDER_SIZE`.
++const MINIMUM_SLIDER_SIZE: Pixels = px(20.);
++
++/// Where the slider was grabbed: the pointer's y and the scroll top then.
++pub(crate) type RulerDrag = Rc<Cell<Option<(Pixels, Pixels)>>>;
++
++/// Changed rows of each lane, as fractions of all rows.
++pub(crate) struct Zones {
++    removed: Vec<Range<f32>>,
++    inserted: Vec<Range<f32>>,
++}
++
++impl Zones {
++    pub(crate) fn new(rows: &[DisplayRow]) -> Self {
++        let mut removed = Vec::new();
++        let mut inserted = Vec::new();
++        let total = rows.len().max(1) as f32;
++        let push = |zones: &mut Vec<Range<f32>>, ix: usize| {
++            let (start, end) = (ix as f32 / total, (ix + 1) as f32 / total);
++            match zones.last_mut() {
++                Some(last) if last.end == start => last.end = end,
++                _ => zones.push(start..end),
++            }
++        };
++        for (ix, row) in rows.iter().enumerate() {
++            if let DisplayRow::Code {
++                original,
++                modified,
++                changed: true,
++                ..
++            } = row
++            {
++                if original.is_some() {
++                    push(&mut removed, ix);
++                }
++                if modified.is_some() {
++                    push(&mut inserted, ix);
++                }
++            }
++        }
++        Self { removed, inserted }
++    }
++}
++
++pub(crate) struct RulerColors {
++    pub removed: Hsla,
++    pub inserted: Hsla,
++    pub background: Hsla,
++    pub slider: Hsla,
++    pub slider_hover: Hsla,
++    pub slider_active: Hsla,
++}
++
++/// The slider's top and height for a scroll position, as VS Code's
++/// `ScrollbarState` computes them.
++fn slider(visible: Pixels, content: Pixels, scroll_top: Pixels) -> (Pixels, Pixels, f32) {
++    if content <= visible {
++        return (px(0.), visible, 0.);
++    }
++    let size = (visible * (visible / content)).floor().max(MINIMUM_SLIDER_SIZE).round();
++    let ratio = (visible - size) / (content - visible);
++    ((scroll_top * ratio).round(), size, ratio)
++}
++
++fn scroll_top(list: &ListState) -> Pixels {
++    -list.offset().y
++}
++
++fn set_scroll_top(state: &Entity<DiffState>, top: Pixels, cx: &mut App) {
++    state.update(cx, |state, cx| {
++        let list = state.list();
++        let max = (list.content_size().height - list.viewport_bounds().size.height).max(px(0.));
++        list.set_offset(point(px(0.), -top.clamp(px(0.), max)));
++        cx.notify();
++    });
++}
++
++pub(crate) fn render_overview_ruler(
++    zones: Zones,
++    colors: RulerColors,
++    state: Entity<DiffState>,
++    list: ListState,
++    drag: RulerDrag,
++) -> impl IntoElement {
++    canvas(
++        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
++        move |bounds: Bounds<Pixels>, hitbox: Hitbox, window, _| {
++            let height = bounds.size.height;
++            let content = list.content_size().height.max(height);
++            let (slider_top, slider_size, ratio) = slider(height, content, scroll_top(&list));
++
++            window.paint_quad(fill(bounds, colors.background));
++            for (zones, left, color) in [
++                (&zones.removed, px(0.), colors.removed),
++                (&zones.inserted, LANE_WIDTH, colors.inserted),
++            ] {
++                for zone in zones {
++                    let y1 = (height * zone.start).floor();
++                    let y2 = (height * zone.end).floor();
++                    let half = ((y2 - y1) / 2.).max(MINIMUM_ZONE_HEIGHT / 2.);
++                    let center = ((y1 + y2) / 2.).clamp(half, height - half);
++                    window.paint_quad(fill(
++                        Bounds::new(
++                            bounds.origin + point(left, center - half),
++                            size(LANE_WIDTH, half * 2.),
++                        ),
++                        color,
++                    ));
++                }
++            }
++            let slider_bounds = Bounds::new(
++                bounds.origin + point(px(0.), slider_top),
++                size(RULER_WIDTH, slider_size),
++            );
++            let slider_color = if drag.get().is_some() {
++                colors.slider_active
++            } else if hitbox.is_hovered(window) && slider_bounds.contains(&window.mouse_position())
++            {
++                colors.slider_hover
++            } else {
++                colors.slider
++            };
++            window.paint_quad(fill(slider_bounds, slider_color));
++
++            window.on_mouse_event({
++                let (state, list, drag) = (state.clone(), list.clone(), drag.clone());
++                let hitbox = hitbox.clone();
++                move |event: &MouseDownEvent, phase, window, cx| {
++                    if !phase.bubble()
++                        || event.button != MouseButton::Left
++                        || !hitbox.is_hovered(window)
++                    {
++                        return;
++                    }
++                    let y = event.position.y - bounds.top();
++                    let mut top = scroll_top(&list);
++                    // Pressing beside the slider centers it there first.
++                    if (y < slider_top || y >= slider_top + slider_size) && ratio > 0. {
++                        top = (y - slider_size / 2.) / ratio;
++                        set_scroll_top(&state, top, cx);
++                        top = scroll_top(&list);
++                    }
++                    list.start_drag();
++                    drag.set(Some((event.position.y, top)));
++                    cx.stop_propagation();
++                }
++            });
++            window.on_mouse_event({
++                let (state, drag) = (state.clone(), drag.clone());
++                move |event: &MouseMoveEvent, phase, _, cx| {
++                    if let (true, Some((start_y, start_top))) = (phase.bubble(), drag.get())
++                        && ratio > 0.
++                    {
++                        set_scroll_top(&state, start_top + (event.position.y - start_y) / ratio, cx);
++                    }
++                }
++            });
++            window.on_mouse_event({
++                let (state, list, drag) = (state.clone(), list.clone(), drag.clone());
++                move |_: &MouseUpEvent, phase, _, cx| {
++                    if phase.bubble() && drag.take().is_some() {
++                        list.end_drag();
++                        state.update(cx, |_, cx| cx.notify());
++                    }
++                }
++            });
++            window.on_mouse_event({
++                let (state, list) = (state.clone(), list.clone());
++                move |event: &ScrollEvent, phase, window, cx| {
++                    if phase.bubble() && hitbox.is_hovered(window) {
++                        let delta = event.delta.pixel_delta(window.line_height());
++                        set_scroll_top(&state, scroll_top(&list) - delta.y, cx);
++                    }
++                }
++            });
++        },
++    )
++    .w(RULER_WIDTH)
++    .h_full()
++    .flex_none()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn changed_rows_become_zones_in_their_lanes() {
++        let code = |original, modified, changed| DisplayRow::Code {
++            file: 0,
++            original,
++            modified,
++            changed,
++        };
++        let rows = [
++            code(Some(0), Some(0), false),
++            // A modified line: both lanes.
++            code(Some(1), Some(1), true),
++            // Then a removed line and an inserted one; adjacent rows merge.
++            code(Some(2), None, true),
++            code(None, Some(2), true),
++        ];
++        let zones = Zones::new(&rows);
++        assert_eq!(zones.removed, [0.25..0.75]);
++        assert_eq!(zones.inserted, [0.25..0.5, 0.75..1.0]);
++    }
++
++    #[test]
++    fn the_slider_spans_the_visible_part_and_keeps_a_grabbable_size() {
++        // Everything fits: the slider fills the ruler and cannot move.
++        assert_eq!(slider(px(500.), px(400.), px(0.)), (px(0.), px(500.), 0.));
++        // A quarter visible, scrolled to the end.
++        let (top, size, _) = slider(px(400.), px(1600.), px(1200.));
++        assert_eq!((top, size), (px(300.), px(100.)));
++        // Very long content still gets a 20-pixel slider.
++        assert_eq!(slider(px(400.), px(400_000.), px(0.)).1, px(20.));
++    }
++}

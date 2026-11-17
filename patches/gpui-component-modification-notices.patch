@@ -1,0 +1,136 @@
+--- a/src/command/command.rs
++++ b/src/command/command.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use std::rc::Rc;
+ 
+ use gpui::{
+--- a/src/command/state.rs
++++ b/src/command/state.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use gpui_base::TestSupportExt as _;
+ use std::rc::Rc;
+ 
+--- a/src/diff/guides.rs
++++ b/src/diff/guides.rs
+@@ -1,3 +1,5 @@
++// Added by Whit, adapted from Visual Studio Code (MIT, Copyright (c) Microsoft
++// Corporation); see THIRD-PARTY-NOTICES.md in the Whit repository.
+ //! VS Code's indentation and bracket pair guides for one side of a file, as
+ //! drawn with `editor.guides.indentation`, `editor.guides.bracketPairs: true`
+ //! and the default `editor.guides.bracketPairsHorizontal: "active"`.
+--- a/src/diff/mod.rs
++++ b/src/diff/mod.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ //! Readonly, virtualized patch display inspired by Diffs from Pierre.
+ //! Parse an externally supplied patch into [`DiffFile`]s, retain one
+ //! [`DiffState`] for all of them in the owner, and build [`Diff`] during rendering.
+--- a/src/diff/overview.rs
++++ b/src/diff/overview.rs
+@@ -1,3 +1,5 @@
++// Added by Whit, adapted from Visual Studio Code (MIT, Copyright (c) Microsoft
++// Corporation); see THIRD-PARTY-NOTICES.md in the Whit repository.
+ //! VS Code's diff overview ruler: a 30-pixel strip at the right edge with a
+ //! lane of removed lines and a lane of inserted lines, under a slider that
+ //! shows and moves the visible part. Follows `overviewRulerFeature.ts`,
+--- a/src/diff/presentation.rs
++++ b/src/diff/presentation.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ //! Presentation prepared on a background thread: syntax captures, as
+ //! theme-independent highlight names or an application highlighter's styles,
+ //! inline changes between paired lines, and each side's guides.
+--- a/src/diff/scroll_tests.rs
++++ b/src/diff/scroll_tests.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use gpui::{
+     AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement as _,
+     Pixels, Render, ScrollDelta, ScrollEvent, Styled as _, TestAppContext, VisualTestContext,
+--- a/src/diff/selection.rs
++++ b/src/diff/selection.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ //! Bridge the virtualized code surface to Base's window text selection.
+ //! Content keys are exact source offsets, so copying does not depend on which
+ //! rows are still painted when the gesture ends.
+--- a/src/diff/state.rs
++++ b/src/diff/state.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use std::{
+     cell::RefCell,
+     collections::{HashMap, HashSet},
+--- a/src/highlighter/highlighter.rs
++++ b/src/highlighter/highlighter.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ #[cfg(test)]
+ use crate::highlighter::HighlightTheme;
+ use crate::highlighter::LanguageRegistry;
+--- a/src/highlighter/languages.rs
++++ b/src/highlighter/languages.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use gpui::SharedString;
+ 
+ use crate::highlighter::GrammarConfig;
+--- a/src/highlighter/languages/javascript/highlights-jsx.scm
++++ b/src/highlighter/languages/javascript/highlights-jsx.scm
+@@ -1,3 +1,5 @@
++; Added by Whit, adapted from tree-sitter-javascript (MIT, Copyright (c) 2014
++; Max Brunsfeld); see THIRD-PARTY-NOTICES.md in the Whit repository.
+ (jsx_opening_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
+ (jsx_closing_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
+ (jsx_self_closing_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
+--- a/src/highlighter/languages/javascript/highlights.scm
++++ b/src/highlighter/languages/javascript/highlights.scm
+@@ -1,3 +1,4 @@
++; Modified by Whit; its patches/ folder holds the changes.
+ ; Variables
+ ;----------
+ 
+--- a/src/highlighter/languages/typescript/highlights.scm
++++ b/src/highlighter/languages/typescript/highlights.scm
+@@ -1,3 +1,4 @@
++; Modified by Whit; its patches/ folder holds the changes.
+ ; Types
+ ; Variables
+ ;----------
+--- a/src/highlighter/registry.rs
++++ b/src/highlighter/registry.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use gpui::{App, FontWeight, HighlightStyle, Hsla, SharedString};
+ use schemars::JsonSchema;
+ use serde::{Deserialize, Serialize};
+--- a/src/highlighter/wasm_stub.rs
++++ b/src/highlighter/wasm_stub.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ //! The highlighter module without tree-sitter: for WASM, or a native build
+ //! that chose `syntect` or no highlighter at all. Syntax highlighting itself
+ //! comes from `syntect_backend` when that feature is on; the theme types here
+--- a/src/menu/popup_menu.rs
++++ b/src/menu/popup_menu.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use crate::ThemeStyled as _;
+ use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
+ use crate::actions::{SelectLeft, SelectRight};
+--- a/src/notification.rs
++++ b/src/notification.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use std::{
+     any::TypeId,
+     borrow::Cow,
+--- a/src/tooltip.rs
++++ b/src/tooltip.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use crate::root::WindowState;
+ use std::{
+     cell::RefCell,

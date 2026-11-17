@@ -1,0 +1,16 @@
+--- a/src/highlighter/highlighter.rs
++++ b/src/highlighter/highlighter.rs
+@@ -469,8 +469,11 @@
+         };
+ 
+         // Injection layers are computed separately during parsing, so do not
+-        // emit injection captures from the main highlight query.
+-        for pattern_index in 0..locals_pattern_index {
++        // emit injection captures from the main highlight query. Nor locals
++        // captures: they track scopes rather than name a style, and a
++        // `local.definition` would override `variable.parameter` and leave the
++        // parameter unstyled.
++        for pattern_index in 0..highlights_pattern_index {
+             query.disable_pattern(pattern_index);
+         }
+ 

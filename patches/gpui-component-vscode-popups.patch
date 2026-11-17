@@ -1,0 +1,389 @@
+--- a/src/menu/popup_menu.rs
++++ b/src/menu/popup_menu.rs
+@@ -8,9 +8,8 @@
+ use gpui::{
+     Action, Anchor, AnyElement, App, AppContext, Bounds, Context, DismissEvent, Edges, Entity,
+     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
+-    ParentElement, Pixels, Rems, Render, Role, ScrollHandle, SharedString,
+-    StatefulInteractiveElement, Styled, WeakEntity, Window, anchored, deferred, div,
+-    prelude::FluentBuilder, px, rems,
++    ParentElement, Pixels, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement,
++    Styled, WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder, px, rems,
+ };
+ use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Point, Subscription};
+ use gpui_base::TestSupportExt as _;
+@@ -1250,6 +1249,8 @@
+                 .flex_nowrap()
+                 .border_0()
+                 .bg(gpui::transparent_white())
++                // VS Code's `.keybinding` takes the menu's 13px.
++                .text_size(px(13.))
+         })
+     }
+ 
+@@ -1325,20 +1326,26 @@
+ 
+         let selected = self.selected_index == Some(ix);
+         const EDGE_PADDING: Pixels = px(4.);
+-        const INNER_PADDING: Rems = rems(0.5);
+ 
+         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
+ 
++        // VS Code's `.action-menu-item`: 24px tall with 6px corners, 13px
++        // text with 2em (26px) either side, and its submenu indicator 1.8em
++        // of 60% (14px) from the right edge.
+         let (item_height, radius) = match self.size {
+-            Size::Small => (rems(1.25), options.radius.half()),
+-            _ => (rems(1.625), options.radius),
++            Size::Small => (
++                rems(1.25).to_pixels(window.rem_size()),
++                options.radius.half(),
++            ),
++            _ => (px(24.), px(6.)),
+         };
+ 
+         let this = MenuItemElement::new(ix)
+             .relative()
+-            .text_sm()
++            .text_size(px(13.))
+             .py_0()
+-            .px(INNER_PADDING)
++            .pl(px(26.))
++            .pr(px(if is_submenu { 14. } else { 26. }))
+             .rounded(radius)
+             .items_center()
+             .selected(selected)
+@@ -1372,13 +1379,15 @@
+             );
+ 
+         match item {
++            // VS Code's separator: 1px across the whole menu, 5px apart.
+             PopupMenuItem::Separator => this
+                 .h_auto()
+                 .p_0()
+-                .my_0p5()
+-                .mx_neg_1()
+-                .border_b(px(2.))
+-                .border_color(cx.theme().border)
++                .my(px(5.))
++                .mx(px(-4.))
++                .border_b(px(1.))
++                // `menu.separatorBackground`: the foreground at 20%.
++                .border_color(cx.theme().foreground.opacity(0.2))
+                 .disabled(true),
+             PopupMenuItem::Label(label) => this.disabled(true).cursor_default().child(
+                 h_flex()
+@@ -1446,7 +1455,8 @@
+                 .child(
+                     h_flex()
+                         .w_full()
+-                        .gap_3()
++                        // The label's and the keybinding's 26px paddings.
++                        .gap(px(52.))
+                         .items_center()
+                         .justify_between()
+                         .when(!show_link_icon, |this| this.child(label.clone()))
+@@ -1498,13 +1508,14 @@
+                         .child(
+                             h_flex()
+                                 .flex_1()
+-                                .gap_2()
++                                // The label's 26px and the indicator's 14px.
++                                .gap(px(40.))
+                                 .items_center()
+                                 .justify_between()
+                                 .child(label.clone())
+                                 .child(
+                                     Icon::new(IconName::ChevronRight)
+-                                        .xsmall()
++                                        .size(px(16.))
+                                         .text_color(cx.theme().muted_foreground),
+                                 ),
+                         ),
+@@ -1608,15 +1619,17 @@
+             .on_action(cx.listener(Self::dismiss))
+             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
+             .popover_style(cx)
++            // VS Code's `.monaco-menu`: 8px corners, 4px above and below the
++            // rows, which sit 4px in from the sides, at least 160px wide.
++            .rounded(px(8.))
+             .text_color(cx.theme().popover_foreground)
+             .relative()
+             .occlude()
+             .child(
+                 v_flex()
+                     .id("items")
+-                    .p_1()
+-                    .gap_y_0p5()
+-                    .min_w(rems(8.))
++                    .p(px(4.))
++                    .min_w(px(160.))
+                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
+                     .map(|this| match self.max_width {
+                         Some(max_width) => this.max_w(max_width),
+--- a/src/notification.rs
++++ b/src/notification.rs
+@@ -429,25 +429,38 @@
+             .border_1()
+             .border_color(cx.theme().border)
+             .bg(cx.theme().tokens.popover)
+-            .rounded(cx.theme().radius_lg)
++            // VS Code's toast: 4px corners, 10px 5px padding, 13px text on
++            // 22px lines after an 18px icon in a 16px column 4px either side.
++            .rounded(px(4.))
+             .shadow(toast_shadow(1.))
+-            .py_3p5()
+-            .px_4()
++            .py(px(10.))
++            .px(px(5.))
+             .gap_3()
++            .text_size(px(13.))
++            .line_height(px(22.))
+             .refine_style(&self.style)
+             .when_some(icon, |this, icon| {
+-                this.child(div().absolute().top(px(18.)).left_4().child(icon))
++                this.child(
++                    div()
++                        .absolute()
++                        .top(px(10.))
++                        .left(px(5. + 4. - 1.))
++                        .h(px(22.))
++                        .flex()
++                        .items_center()
++                        .child(icon.size(px(18.))),
++                )
+             })
+             .child(
+                 v_flex()
+                     .flex_1()
+                     .overflow_hidden()
+-                    .when(has_icon, |this| this.pl_6())
++                    .when(has_icon, |this| this.pl(px(4. + 16. + 4.)))
+                     .when_some(self.title.clone(), |this, title| {
+-                        this.child(div().text_sm().font_semibold().child(title))
++                        this.child(div().font_semibold().child(title))
+                     })
+                     .when_some(self.message.clone(), |this, message| {
+-                        this.child(div().text_sm().child(message))
++                        this.child(div().child(message))
+                     })
+                     .when_some(content, |this, content| this.child(content)),
+             )
+--- a/src/tooltip.rs
++++ b/src/tooltip.rs
+@@ -7,8 +7,9 @@
+ 
+ use gpui::{
+     Action, AnyElement, AnyView, App, AppContext, Bounds, Context, ElementId, GlobalElementId,
+-    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
++    Hsla, IntoElement, MouseButton, ParentElement, PathBuilder, Pixels, Render, SharedString,
++    StatefulInteractiveElement, StyleRefinement, Styled, Window, canvas, div, point,
++    prelude::FluentBuilder, px,
+ };
+ pub use gpui_base::TooltipDefaults;
+ use gpui_base::{
+@@ -41,6 +42,9 @@
+     content: TooltipContext,
+     key_binding: Option<Kbd>,
+     action: Option<(Box<dyn Action>, Option<SharedString>)>,
++    /// The bounds of the trigger it is placed against, which turn it into
++    /// VS Code's hover with a pointer.
++    trigger: Option<Bounds<Pixels>>,
+ }
+ 
+ impl Tooltip {
+@@ -51,6 +55,7 @@
+             content: TooltipContext::Text(text.into()),
+             key_binding: None,
+             action: None,
++            trigger: None,
+         }
+     }
+ 
+@@ -64,6 +69,7 @@
+             style: StyleRefinement::default(),
+             key_binding: None,
+             action: None,
++            trigger: None,
+             content: TooltipContext::Element(Box::new(move |window, cx| {
+                 builder(window, cx).into_any_element()
+             })),
+@@ -110,41 +116,117 @@
+             }
+         };
+ 
+-        div().child(
+-            // Wrap in a child, to ensure the left margin is applied to the tooltip
+-            BaseTooltip::new("tooltip-popup")
+-                .h_flex()
+-                .font_family(cx.theme().font_family.clone())
+-                .m_3()
+-                .bg(cx.theme().tokens.popover)
+-                .text_color(cx.theme().popover_foreground)
+-                .bg(cx.theme().tokens.popover)
+-                .border_1()
+-                .border_color(cx.theme().border)
+-                .shadow_md()
+-                .rounded(cx.theme().radius)
+-                .justify_between()
+-                .py_0p5()
+-                .px_2()
+-                .text_sm()
+-                .gap_3()
+-                .refine_style(&self.style)
+-                .map(|this| {
+-                    this.child(div().map(|this| match self.content {
+-                        TooltipContext::Text(ref text) => this.child(text.clone()),
+-                        TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
+-                    }))
+-                })
+-                .when_some(key_binding, |this, kbd| {
+-                    this.child(
+-                        div()
+-                            .text_xs()
+-                            .flex_shrink_0()
+-                            .text_color(cx.theme().muted_foreground)
+-                            .child(kbd.appearance(false)),
++        let trigger = self.trigger;
++        let (background, border): (Hsla, Hsla) =
++            (cx.theme().tokens.popover.into(), cx.theme().border);
++        div()
++            .relative()
++            .child(
++                // Wrap in a child, to ensure the left margin is applied to the tooltip
++                BaseTooltip::new("tooltip-popup")
++                    .h_flex()
++                    .font_family(cx.theme().font_family.clone())
++                    .map(|this| match trigger {
++                        Some(_) => this.m(px(1.)).rounded(px(3.)),
++                        None => this.m_3().rounded(px(5.)),
++                    })
++                    .bg(background)
++                    .text_color(cx.theme().popover_foreground)
++                    .border_1()
++                    .border_color(border)
++                    .shadow_md()
++                    // VS Code's compact workbench hover: 5px corners (3px with a
++                    // pointer), 2px 8px padding, 12px text on 19px lines.
++                    .justify_between()
++                    .py(px(2.))
++                    .px(px(8.))
++                    .text_size(px(12.))
++                    .line_height(px(19.))
++                    .gap_3()
++                    .refine_style(&self.style)
++                    .map(|this| {
++                        this.child(div().map(|this| match self.content {
++                            TooltipContext::Text(ref text) => this.child(text.clone()),
++                            TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
++                        }))
++                    })
++                    .when_some(key_binding, |this, kbd| {
++                        this.child(
++                            div()
++                                .text_xs()
++                                .flex_shrink_0()
++                                .text_color(cx.theme().muted_foreground)
++                                .child(kbd.appearance(false)),
++                        )
++                    }),
++            )
++            // After the tooltip, which draws its border over its own children,
++            // so the arrow's fill covers the border where it stands; inset by
++            // the tooltip's 1px margin to its bounds.
++            .when_some(trigger, |this, trigger| {
++                this.child(
++                    canvas(
++                        |_, _, _| {},
++                        move |bounds, _, window, _| {
++                            paint_pointer(bounds, trigger, background, border, window)
++                        },
+                     )
+-                }),
+-        )
++                    .absolute()
++                    .inset(px(1.)),
++                )
++            })
++    }
++}
++
++/// VS Code's `.workbench-hover-pointer`: a 5px square with a 1px border on
++/// two sides, turned to stand on the hover's edge facing `trigger`, so the
++/// bordered half points out of `hover` and its fill covers the edge below.
++/// It sits at the hover's middle, or at the trigger's when the hover was
++/// pushed aside by the window's edge.
++fn paint_pointer(
++    hover: Bounds<Pixels>,
++    trigger: Bounds<Pixels>,
++    background: Hsla,
++    border: Hsla,
++    window: &mut Window,
++) {
++    // Half the diagonal of the 6px bordered square, and of its 5px fill,
++    // whose center sits 0.5px further in on each axis.
++    let outer = 6. * std::f32::consts::FRAC_1_SQRT_2;
++    let inner = 5. * std::f32::consts::FRAC_1_SQRT_2;
++    let inset = 0.5 * std::f32::consts::SQRT_2;
++
++    let middle = hover.center().x;
++    let x = if middle >= trigger.left() && middle <= trigger.right() {
++        middle
++    } else {
++        trigger.center().x
++    };
++    let below = hover.top() >= trigger.bottom();
++    let (edge, inward) = if below {
++        (hover.top(), 1.)
++    } else {
++        (hover.bottom(), -1.)
++    };
++    let diamond = |half: f32, shift: f32| {
++        let y = edge + px(shift * inward);
++        let mut path = PathBuilder::fill();
++        path.add_polygon(
++            &[
++                point(x, y - px(half)),
++                point(x + px(half), y),
++                point(x, y + px(half)),
++                point(x - px(half), y),
++            ],
++            true,
++        );
++        path.build().ok()
++    };
++    if let Some(path) = diamond(outer, 0.) {
++        window.paint_path(path, border);
++    }
++    if let Some(path) = diamond(inner, inset) {
++        window.paint_path(path, background);
+     }
+ }
+ 
+@@ -311,12 +393,20 @@
+                         overlay.update(cx, |o: &mut BaseTooltipOverlay, cx| {
+                             let build = build_tooltip.clone();
+                             let request = BaseTooltipRequest::new(bounds, move |window, cx| {
+-                                build(window, cx)
++                                let view = build(window, cx);
++                                // Placed against its trigger, a tooltip is
++                                // VS Code's hover with a pointer: 1px from
++                                // the trigger, with 3px corners and an arrow
++                                // pointing at it.
++                                if let Ok(tooltip) = view.clone().downcast::<Tooltip>() {
++                                    tooltip.update(cx, |tooltip, _| tooltip.trigger = Some(bounds));
++                                }
++                                view
+                             });
+-                            let request = match preferred_placement {
+-                                Some(placement) => request.with_placement(placement),
+-                                None => request,
+-                            };
++                            // VS Code shows a hover below its target unless
++                            // told otherwise.
++                            let request = request
++                                .with_placement(preferred_placement.unwrap_or(Placement::Bottom));
+                             let request = match show_delay {
+                                 Some(delay) => request.with_show_delay(delay),
+                                 None => request,

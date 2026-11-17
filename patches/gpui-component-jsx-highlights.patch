@@ -1,0 +1,47 @@
+--- a/src/highlighter/languages.rs
++++ b/src/highlighter/languages.rs
+@@ -434,9 +434,14 @@
+                 "",
+             ),
+             #[cfg(feature = "tree-sitter-javascript")]
++            // JSX rules come first: for the same node the earlier pattern
++            // wins, and `(identifier) @variable` would otherwise claim tags.
+             Self::JavaScript => (
+                 tree_sitter_javascript::LANGUAGE,
+-                include_str!("languages/javascript/highlights.scm"),
++                concat!(
++                    include_str!("languages/javascript/highlights-jsx.scm"),
++                    include_str!("languages/javascript/highlights.scm"),
++                ),
+                 include_str!("languages/javascript/injections.scm"),
+                 tree_sitter_javascript::LOCALS_QUERY,
+             ),
+@@ -535,10 +540,15 @@
+                 tree_sitter_typescript::LOCALS_QUERY,
+             ),
+             #[cfg(feature = "tree-sitter-tsx")]
++            // The crate's `HIGHLIGHTS_QUERY` only holds what TypeScript adds on
++            // top of JavaScript, so TSX takes the full TypeScript query plus JSX.
+             Self::Tsx => (
+                 tree_sitter_typescript::LANGUAGE_TSX,
+-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+-                "",
++                concat!(
++                    include_str!("languages/javascript/highlights-jsx.scm"),
++                    include_str!("languages/typescript/highlights.scm"),
++                ),
++                include_str!("languages/javascript/injections.scm"),
+                 tree_sitter_typescript::LOCALS_QUERY,
+             ),
+             #[cfg(feature = "tree-sitter-diff")]
+--- /dev/null
++++ b/src/highlighter/languages/javascript/highlights-jsx.scm
+@@ -0,0 +1,8 @@
++(jsx_opening_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
++(jsx_closing_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
++(jsx_self_closing_element (identifier) @tag (#match? @tag "^[a-z][^.]*$"))
++
++(jsx_attribute (property_identifier) @attribute)
++(jsx_opening_element (["<" ">"]) @punctuation.bracket)
++(jsx_closing_element (["</" ">"]) @punctuation.bracket)
++(jsx_self_closing_element (["<" "/>"]) @punctuation.bracket)

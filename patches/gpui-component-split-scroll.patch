@@ -1,0 +1,598 @@
+diff --git a/src/diff/mod.rs b/src/diff/mod.rs
+index 2781ce0..7d81545 100644
+--- a/src/diff/mod.rs
++++ b/src/diff/mod.rs
+@@ -23,9 +23,9 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
+ use gpui::{
+     AnyElement, App, Axis, ClickEvent, ClipboardItem, Context, ElementId, Entity, Focusable as _,
+     HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ListOffset,
+-    MouseButton, ParentElement as _, Pixels, RenderOnce, SharedString,
++    MouseButton, ParentElement as _, Pixels, RenderOnce, ScrollHandle, SharedString,
+     StatefulInteractiveElement as _, StyleRefinement, Styled, TextRun, Window, div, list, point,
+-    prelude::FluentBuilder as _, px,
++    prelude::FluentBuilder as _, px, size,
+ };
+ use gpui_base::TestSupportExt as _;
+ use rust_i18n::t;
+@@ -135,6 +135,18 @@ pub enum DiffHunkSeparator {
+     Simple,
+ }
+ 
++/// Backgrounds of changed lines and of their changed words, in place of the
++/// theme's success and danger colors, for matching another editor's palette.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct DiffChangeColors {
++    pub inserted_line: Hsla,
++    pub removed_line: Hsla,
++    /// Drawn over `inserted_line`.
++    pub inserted_text: Hsla,
++    /// Drawn over `removed_line`.
++    pub removed_text: Hsla,
++}
++
+ /// How changed lines are marked beside the code.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ #[non_exhaustive]
+@@ -230,6 +242,7 @@ pub struct Diff {
+     hunk_separator: DiffHunkSeparator,
+     change_indicator: DiffChangeIndicator,
+     change_background: bool,
++    change_colors: Option<DiffChangeColors>,
+     soft_wrap: bool,
+     header: HeaderSlots,
+     annotations: Rc<Annotations>,
+@@ -262,6 +275,7 @@ impl Diff {
+             hunk_separator: DiffHunkSeparator::default(),
+             change_indicator: DiffChangeIndicator::default(),
+             change_background: true,
++            change_colors: None,
+             soft_wrap: false,
+             header: HeaderSlots::default(),
+             annotations: Rc::default(),
+@@ -305,6 +319,12 @@ impl Diff {
+         self
+     }
+     /// Tints changed lines. Default is true. Inline changes stay emphasized.
++    /// Colors changed lines and words with `colors` instead of the theme's
++    /// success and danger colors. Conflict parts keep their own tints.
++    pub fn change_colors(mut self, colors: DiffChangeColors) -> Self {
++        self.change_colors = Some(colors);
++        self
++    }
+     pub fn change_background(mut self, value: bool) -> Self {
+         self.change_background = value;
+         self
+@@ -537,25 +557,19 @@ fn render_diff(
+         soft_wrap,
+     );
+     if state.update_layout(layout, row_height) {
+-        // Wrapped rows take the viewport width instead of their longest line.
++        // Wrapped text breaks at the cell instead of scrolling inside it.
+         let width = if soft_wrap {
+             px(0.)
+         } else {
+-            measure_code_width(
+-                state.files(),
+-                font_size,
+-                &font_family,
+-                gutter_width,
+-                lane_width,
+-                mode,
+-                window,
+-                cx,
+-            )
++            measure_code_width(state.files(), font_size, &font_family, window, cx)
+         };
+-        state.set_content_width(width);
++        state.set_code_width(width);
+     }
+     state.sync_annotations(&props.annotations.items);
+-    let content_width = state.content_width().max(state.viewport().width);
++    // Rows always fit the body. Unwrapped code scrolls inside each code cell
++    // instead (see `code_line`), so line numbers stay put and both split
++    // columns stay in view however long a line is.
++    let content_width = state.viewport().width;
+     let column_width = if mode == DiffMode::Split {
+         content_width / 2.
+     } else {
+@@ -567,6 +581,8 @@ fn render_diff(
+         mode,
+         content_width,
+         column_width,
++        code_width: state.code_width(),
++        horizontal: state.horizontal_scroll().clone(),
+         font_size,
+         row_height,
+         gutter_width,
+@@ -579,6 +595,7 @@ fn render_diff(
+         hunk_separator: props.hunk_separator,
+         change_indicator: props.change_indicator,
+         change_background: props.change_background,
++        change_colors: props.change_colors,
+         soft_wrap,
+         header: props.header,
+         annotations: props.annotations.clone(),
+@@ -614,10 +631,6 @@ fn render_diff(
+             div()
+                 .id("diff-horizontal")
+                 .size_full()
+-                // Preserve offset tracking and clipping without GPUI's
+-                // single-axis wheel remapping. The sibling mask owns X input.
+-                .when(!soft_wrap, |this| this.overflow_x_hidden())
+-                .track_scroll(&horizontal)
+                 .child(gpui_base::ScrollBounce::new(
+                     "diff-bounce",
+                     &scrollbar,
+@@ -651,7 +664,16 @@ fn render_diff(
+                     .child(Scrollbar::vertical(&scrollbar).viewport_from_layout()),
+             )
+             .when(!soft_wrap, |this| {
+-                this.child(Scrollbar::horizontal(&horizontal))
++                // The handle's bounds are one code cell; the bar spans the
++                // body, so state the scroll range relative to the body.
++                let range = size(state.viewport().width + horizontal.max_offset().x, px(0.));
++                this.child(
++                    div().absolute().inset_0().child(
++                        Scrollbar::horizontal(&horizontal)
++                            .viewport_from_layout()
++                            .scroll_size(range),
++                    ),
++                )
+             })
+         })
+         // A line-number drag may finish anywhere, including outside the body.
+@@ -765,8 +787,7 @@ fn render_diff(
+                             let painted = if soft_wrap {
+                                 px(0.)
+                             } else {
+-                                let painted = state.geometry().borrow().painted_width();
+-                                code_width(painted, gutter_width, lane_width, rem, mode)
++                                state.geometry().borrow().painted_width()
+                             };
+                             if state.record_paint(bounds.size, painted) || rehinted {
+                                 cx.notify();
+@@ -814,6 +835,12 @@ struct CodePresentation {
+     mode: DiffMode,
+     content_width: Pixels,
+     column_width: Pixels,
++    /// Width of the widest source line's text, which every unwrapped code
++    /// cell scrolls through.
++    code_width: Pixels,
++    /// Shared by every unwrapped code cell, so all lines, and both split
++    /// columns, scroll sideways together.
++    horizontal: ScrollHandle,
+     font_size: Pixels,
+     row_height: Pixels,
+     gutter_width: Pixels,
+@@ -826,6 +853,7 @@ struct CodePresentation {
+     hunk_separator: DiffHunkSeparator,
+     change_indicator: DiffChangeIndicator,
+     change_background: bool,
++    change_colors: Option<DiffChangeColors>,
+     soft_wrap: bool,
+     header: HeaderSlots,
+     annotations: Rc<Annotations>,
+@@ -862,31 +890,12 @@ impl CodePresentation {
+     }
+ }
+ 
+-/// Total row width for code of `width` in the current mode.
+-fn code_width(
+-    width: Pixels,
+-    gutter_width: Pixels,
+-    lane_width: Pixels,
+-    rem: Pixels,
+-    mode: DiffMode,
+-) -> Pixels {
+-    if mode == DiffMode::Split {
+-        (width + gutter_width + lane_width + rem * 2.) * 2.
+-    } else {
+-        width + gutter_width * 2. + lane_width + rem * 2.
+-    }
+-}
+-
+-/// Estimates content width from the lines widest in display cells, then
+-/// shapes those candidates with the code font for resolved geometry.
+-#[allow(clippy::too_many_arguments)]
++/// Estimates the widest line's text width from the lines widest in display
++/// cells, then shapes those candidates with the code font for resolved geometry.
+ fn measure_code_width(
+     files: &[DiffFile],
+     font_size: Pixels,
+     family: &SharedString,
+-    gutter_width: Pixels,
+-    lane_width: Pixels,
+-    mode: DiffMode,
+     window: &mut Window,
+     cx: &App,
+ ) -> Pixels {
+@@ -915,7 +924,7 @@ fn measure_code_width(
+         family: family.clone(),
+         ..Default::default()
+     };
+-    let width = candidates
++    candidates
+         .into_iter()
+         .map(|(_, text)| {
+             window
+@@ -935,8 +944,7 @@ fn measure_code_width(
+                 )
+                 .width
+         })
+-        .fold(px(0.), Pixels::max);
+-    code_width(width, gutter_width, lane_width, window.rem_size(), mode)
++        .fold(px(0.), Pixels::max)
+ }
+ 
+ fn render_row(
+@@ -1550,7 +1558,7 @@ fn line_highlights(
+     ix: usize,
+     changed: bool,
+     selected: bool,
+-    status: Hsla,
++    inline_background: Hsla,
+     code: &CodePresentation,
+     cx: &App,
+ ) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
+@@ -1567,7 +1575,7 @@ fn line_highlights(
+             (
+                 range,
+                 HighlightStyle {
+-                    background_color: Some(status.opacity(0.3)),
++                    background_color: Some(inline_background),
+                     ..Default::default()
+                 },
+             )
+@@ -1675,7 +1683,26 @@ fn code_line(
+                 .iter()
+                 .flatten()
+                 .any(|(side, ix)| ix.is_some_and(|ix| code.is_selected(file, *side, ix))));
+-    let highlights = line_highlights(file, side, ix, changed, selected, status, &code, cx);
++    let (line_background, inline_background) = match code.change_colors {
++        Some(colors) if conflict_part.is_none() => {
++            if side == DiffSide::Original {
++                (colors.removed_line, colors.removed_text)
++            } else {
++                (colors.inserted_line, colors.inserted_text)
++            }
++        }
++        _ => (status.opacity(0.12), status.opacity(0.3)),
++    };
++    let highlights = line_highlights(
++        file,
++        side,
++        ix,
++        changed,
++        selected,
++        inline_background,
++        &code,
++        cx,
++    );
+     // An unchanged Unified row shows one source line for both sides; follow
+     // the side a text selection started on so its offsets stay consistent.
+     let (text_side, text_ix) = if code.mode == DiffMode::Unified
+@@ -1700,12 +1727,17 @@ fn code_line(
+         source_line.chunk_ranges().collect()
+     };
+     // A block container gives wrapped text a definite width to break at.
++    // Unwrapped, every line is as wide as the widest one, so all cells share
++    // one scroll range and clamping the shared offset agrees across them.
+     let text = div()
+         .map(|this| {
+             if code.soft_wrap {
+                 this.w_full()
+             } else {
+-                this.flex().flex_row().flex_shrink_0()
++                this.flex()
++                    .flex_row()
++                    .flex_shrink_0()
++                    .min_w(code.code_width)
+             }
+         })
+         .children(ranges.into_iter().enumerate().map(|(chunk_ix, range)| {
+@@ -1808,7 +1840,7 @@ fn code_line(
+         .text_size(code.font_size)
+         .line_height(code.row_height)
+         .when(changed && code.change_background, |this| {
+-            this.bg(status.opacity(0.12))
++            this.bg(line_background)
+         })
+         // An overlay, so the change background shows through a translucent fill.
+         .when_some(decoration, |this, background| {
+@@ -1838,12 +1870,12 @@ fn code_line(
+             div()
+                 .id("source")
+                 .test_support()
+-                .map(|this| {
+-                    if code.soft_wrap {
+-                        this.flex_1().min_w_0()
+-                    } else {
+-                        this.flex_shrink_0()
+-                    }
++                .flex_1()
++                .min_w_0()
++                // Clip the text and shift it by the shared horizontal offset;
++                // the body's mask turns wheel input into that offset.
++                .when(!code.soft_wrap, |this| {
++                    this.overflow_x_hidden().track_scroll(&code.horizontal)
+                 })
+                 .role(gpui::accesskit::Role::Label)
+                 .aria_label(source_line.text().clone())
+diff --git a/src/diff/scroll_tests.rs b/src/diff/scroll_tests.rs
+index a81786e..89f4415 100644
+--- a/src/diff/scroll_tests.rs
++++ b/src/diff/scroll_tests.rs
+@@ -1,9 +1,10 @@
+ use gpui::{
+-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, ScrollDelta,
+-    ScrollEvent, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
++    AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement as _,
++    Pixels, Render, ScrollDelta, ScrollEvent, Styled as _, TestAppContext, VisualTestContext,
++    Window, div, point, px,
+ };
+ 
+-use super::{Diff, DiffState, document::fixture};
++use super::{Diff, DiffMode, DiffSide, DiffState, document::fixture};
+ 
+ /// Every line changed, so the unified patch is two rows per line.
+ const LINES: usize = 300;
+@@ -17,6 +18,8 @@ impl Render for Host {
+         div()
+             .w(px(400.))
+             .h(px(200.))
++            // The application root provides this; pointer selection needs it.
++            .child(gpui_base::TextSelectionLayer)
+             .child(Diff::new(&self.state).size_full())
+     }
+ }
+@@ -82,3 +85,129 @@ fn the_wheel_scrolls_past_the_rows_rendered_so_far(cx: &mut TestAppContext) {
+     // 2000 px of wheel travel crosses far more than the first screen of rows.
+     assert!(top > 40, "scrolled to row {top}");
+ }
++
++/// Numbered tokens tagged by side, so a selection shows which side and which
++/// part of the line it covers.
++fn wide_line(tag: char) -> String {
++    (0..200).map(|ix| format!("{tag}{ix:03} ")).collect()
++}
++
++/// One changed line far wider than either split column of a 400 px body.
++fn wide_split(cx: &mut TestAppContext) -> (Entity<DiffState>, &mut VisualTestContext) {
++    cx.update(crate::init);
++    let original = format!("{}\n", wide_line('o'));
++    let modified = format!("{}\n", wide_line('n'));
++    let state = cx.new(|cx| {
++        DiffState::new([fixture::modified("wide.txt", &original, &modified)], cx)
++            .with_mode(DiffMode::Split)
++    });
++    let (_, cx) = cx.add_window_view({
++        let state = state.clone();
++        move |_, _| Host { state }
++    });
++    for _ in 0..3 {
++        draw(cx);
++    }
++    (state, cx)
++}
++
++/// Where each side's line starts and ends in the window, scrolled out of view or not.
++fn line_extent(
++    state: &Entity<DiffState>,
++    side: DiffSide,
++    cx: &mut VisualTestContext,
++) -> (Pixels, Pixels) {
++    cx.update(|_, cx| {
++        let runs = state.read(cx).geometry().borrow().run_bounds();
++        let runs = runs.iter().filter(|(run_side, _)| *run_side == side);
++        let start = runs
++            .clone()
++            .map(|(_, bounds)| bounds.left())
++            .fold(Pixels::MAX, Pixels::min);
++        let end = runs
++            .map(|(_, bounds)| bounds.right())
++            .fold(Pixels::MIN, Pixels::max);
++        (start, end)
++    })
++}
++
++fn scroll_sideways(delta: Pixels, cx: &mut VisualTestContext) {
++    cx.simulate_event(ScrollEvent {
++        position: point(px(100.), px(100.)),
++        delta: ScrollDelta::Pixels(point(delta, px(0.))),
++        ..Default::default()
++    });
++    draw(cx);
++}
++
++#[gpui::test]
++fn split_columns_clip_long_lines_and_scroll_sideways_together(cx: &mut TestAppContext) {
++    let (state, cx) = wide_split(cx);
++    let (old_start, _) = line_extent(&state, DiffSide::Original, cx);
++    let (new_start, _) = line_extent(&state, DiffSide::Modified, cx);
++    // The modified column starts mid-body, not past the longest line.
++    assert!(old_start < px(100.), "original starts at {old_start:?}");
++    assert!(
++        new_start > px(200.) && new_start < px(300.),
++        "modified starts at {new_start:?}"
++    );
++
++    scroll_sideways(px(-100.), cx);
++    assert_eq!(
++        line_extent(&state, DiffSide::Original, cx).0,
++        old_start - px(100.)
++    );
++    assert_eq!(
++        line_extent(&state, DiffSide::Modified, cx).0,
++        new_start - px(100.)
++    );
++
++    // Scrolling stops once the line's end reaches the column's edge.
++    for _ in 0..100 {
++        scroll_sideways(px(-200.), cx);
++    }
++    let (_, old_end) = line_extent(&state, DiffSide::Original, cx);
++    let (_, new_end) = line_extent(&state, DiffSide::Modified, cx);
++    assert!(
++        old_end > px(180.) && old_end <= px(200.),
++        "original ends at {old_end:?}"
++    );
++    assert!(
++        new_end > px(380.) && new_end <= px(400.),
++        "modified ends at {new_end:?}"
++    );
++}
++
++#[gpui::test]
++fn dragging_after_a_sideways_scroll_selects_the_text_under_the_pointer(cx: &mut TestAppContext) {
++    let (state, cx) = wide_split(cx);
++    scroll_sideways(px(-300.), cx);
++    let row_y = cx.update(|_, cx| {
++        let runs = state.read(cx).geometry().borrow().run_bounds();
++        runs[0].1.center().y
++    });
++    // Each column's clipped text runs on, unseen, under the other column.
++    for (side, tag, from, to) in [
++        (DiffSide::Original, 'o', px(60.), px(140.)),
++        (DiffSide::Modified, 'n', px(260.), px(340.)),
++    ] {
++        cx.simulate_mouse_down(point(from, row_y), MouseButton::Left, Modifiers::none());
++        cx.simulate_mouse_move(point(to, row_y), Some(MouseButton::Left), Modifiers::none());
++        cx.simulate_mouse_up(point(to, row_y), MouseButton::Left, Modifiers::none());
++        draw(cx);
++
++        let line = wide_line(tag);
++        let (start, end) = line_extent(&state, side, cx);
++        let char_width = (end - start) / line.len() as f32;
++        let selected = cx.update(|_, cx| state.read(cx).selected_text(cx));
++        assert!(selected.len() >= 8, "{side:?} selected {selected:?}");
++        let found = line
++            .find(&selected)
++            .unwrap_or_else(|| panic!("{side:?} selected {selected:?}"));
++        let expected = ((from - start) / char_width).round() as usize;
++        assert!(
++            found.abs_diff(expected) <= 1,
++            "{side:?} selected {selected:?} at {found}, pointer over {expected}"
++        );
++    }
++}
+diff --git a/src/diff/selection.rs b/src/diff/selection.rs
+index 1947a0b..3c0e5b7 100644
+--- a/src/diff/selection.rs
++++ b/src/diff/selection.rs
+@@ -30,6 +30,10 @@ pub(crate) struct CodeRun {
+     display_range: Range<usize>,
+     layout: TextLayout,
+     bounds: Bounds<Pixels>,
++    /// The part of `bounds` left after clipping. A long line scrolled inside
++    /// its split column extends, unseen, under the other column, so only
++    /// this part may claim the pointer.
++    visible: Bounds<Pixels>,
+     document: DiffFile,
+ }
+ 
+@@ -61,6 +65,11 @@ impl SelectionGeometry {
+             })
+             .2
+     }
++    /// Each painted text run's side and window bounds.
++    #[cfg(test)]
++    pub fn run_bounds(&self) -> Vec<(DiffSide, Bounds<Pixels>)> {
++        self.runs.iter().map(|run| (run.side, run.bounds)).collect()
++    }
+     pub fn key_at(&self, point: Point<Pixels>, side: Option<DiffSide>) -> Option<u64> {
+         if let Some((count, position, cursor)) = self.multi_click.get() {
+             let run = self.run_at(position, None)?;
+@@ -101,8 +110,8 @@ impl SelectionGeometry {
+             self.runs
+                 .iter()
+                 .min_by(|a, b| {
+-                    distance_to_bounds(point, a.bounds)
+-                        .total_cmp(&distance_to_bounds(point, b.bounds))
++                    distance_to_bounds(point, a.visible)
++                        .total_cmp(&distance_to_bounds(point, b.visible))
+                 })
+                 .map(|run| run.side)
+         })?;
+@@ -110,11 +119,11 @@ impl SelectionGeometry {
+             .iter()
+             .filter(|run| run.side == side)
+             .min_by(|a, b| {
+-                line_distance(point, a.bounds)
+-                    .cmp(&line_distance(point, b.bounds))
++                line_distance(point, a.visible)
++                    .cmp(&line_distance(point, b.visible))
+                     .then_with(|| {
+-                        distance_to_bounds(point, a.bounds)
+-                            .total_cmp(&distance_to_bounds(point, b.bounds))
++                        distance_to_bounds(point, a.visible)
++                            .total_cmp(&distance_to_bounds(point, b.visible))
+                     })
+             })
+     }
+@@ -318,6 +327,7 @@ impl Element for CodeText {
+             display_range: self.range.clone(),
+             layout: text.layout().clone(),
+             bounds,
++            visible: bounds.intersect(&window.content_mask().bounds),
+             document: self.document.clone(),
+         });
+     }
+@@ -489,7 +499,7 @@ impl Element for SelectionLayer {
+             .borrow()
+             .runs
+             .iter()
+-            .map(|run| run.bounds)
++            .map(|run| run.visible)
+             .collect();
+         self.selection.register(
+             TextSelectionRegistration::new(hitbox.clone(), bounds)
+diff --git a/src/diff/state.rs b/src/diff/state.rs
+index fb309b8..95f2736 100644
+--- a/src/diff/state.rs
++++ b/src/diff/state.rs
+@@ -234,7 +234,7 @@ pub struct DiffState {
+     presentations: Vec<Option<Arc<FilePresentation>>>,
+     viewport: Size<Pixels>,
+     layout: Option<LayoutKey>,
+-    content_width: Pixels,
++    code_width: Pixels,
+     row_height: Option<Pixels>,
+     /// The list width the row-height hint was last applied at.
+     hinted_width: Option<Pixels>,
+@@ -368,7 +368,7 @@ impl DiffState {
+             syntax_highlighter: None,
+             viewport: Size::default(),
+             layout: None,
+-            content_width: px(0.),
++            code_width: px(0.),
+             row_height: None,
+             hinted_width: None,
+             annotations: HashSet::new(),
+@@ -586,19 +586,19 @@ impl DiffState {
+     pub(crate) fn viewport(&self) -> Size<Pixels> {
+         self.viewport
+     }
+-    /// The width rows need to show their longest line.
+-    pub(crate) fn content_width(&self) -> Pixels {
+-        self.content_width
++    /// The text width of the widest source line; zero while wrapping.
++    pub(crate) fn code_width(&self) -> Pixels {
++        self.code_width
+     }
+-    pub(crate) fn set_content_width(&mut self, width: Pixels) {
+-        self.content_width = width;
++    pub(crate) fn set_code_width(&mut self, width: Pixels) {
++        self.code_width = width;
+     }
+-    /// Records the painted body size and widest painted row. Returns whether
++    /// Records the painted body size and widest painted line. Returns whether
+     /// either changed, so the frame must be laid out again.
+     pub(crate) fn record_paint(&mut self, viewport: Size<Pixels>, painted_width: Pixels) -> bool {
+-        let wider = painted_width > self.content_width;
++        let wider = painted_width > self.code_width;
+         if wider {
+-            self.content_width = painted_width;
++            self.code_width = painted_width;
+         }
+         let resized = self.viewport != viewport;
+         self.viewport = viewport;

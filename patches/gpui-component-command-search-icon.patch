@@ -1,0 +1,54 @@
+--- a/src/command/command.rs
++++ b/src/command/command.rs
+@@ -22,6 +22,7 @@
+     pub(crate) max_h: DefiniteLength,
+     pub(crate) scroll_bounce: Option<bool>,
+     pub(crate) bordered: bool,
++    pub(crate) search_icon: bool,
+     pub(crate) header: Option<Rc<CommandSlot>>,
+     pub(crate) footer: Option<Rc<CommandSlot>>,
+ }
+@@ -35,6 +36,7 @@
+             max_h: rems(18.75).into(),
+             scroll_bounce: None,
+             bordered: true,
++            search_icon: true,
+             header: None,
+             footer: None,
+         }
+@@ -212,6 +214,16 @@
+     /// such as a [`crate::Dialog`].
+     pub fn bordered(mut self, bordered: bool) -> Self {
+         self.options.bordered = bordered;
++        self
++    }
++
++    /// Set whether the search field shows its leading search icon, default:
++    /// `true`.
++    ///
++    /// Turn it off for a picker styled after one without it, such as VS
++    /// Code's Quick Open.
++    pub fn search_icon(mut self, search_icon: bool) -> Self {
++        self.options.search_icon = search_icon;
+         self
+     }
+ 
+--- a/src/command/state.rs
++++ b/src/command/state.rs
+@@ -954,10 +954,12 @@
+                         .border_color(cx.theme().border)
+                         .child(
+                             Input::new(&self.query_input)
+-                                .prefix(
+-                                    Icon::new(IconName::Search)
+-                                        .text_color(cx.theme().muted_foreground),
+-                                )
++                                .when(self.options.search_icon, |input| {
++                                    input.prefix(
++                                        Icon::new(IconName::Search)
++                                            .text_color(cx.theme().muted_foreground),
++                                    )
++                                })
+                                 .appearance(false)
+                                 .p_0(),
+                         ),

@@ -1,0 +1,55 @@
+[package]
+name = "whit"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+dirs = "7.0.0"
+env_logger = "0.11.11"
+# The one-shot answer of a picker or input box to the flow awaiting it.
+futures-channel = "0.3.34"
+# Syntax highlighting in the diff: the bundled tree-sitter grammars.
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-languages"] }
+libc = "0.2.191"
+# The vscode-icons file icons, embedded in the binary.
+rust-embed = "8.14.0"
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.9.1", features = ["test-support", "tree-sitter-languages"] }
+
+[features]
+# Off-screen screenshot tests with the real macOS renderer, run on demand:
+# `cargo test --features visual-tests --test visual`.
+visual-tests = []
+
+[[test]]
+name = "visual"
+harness = false
+required-features = ["visual-tests"]
+
+
+[package.metadata.packager]
+product-name = "Whit"
+identifier = "io.github.colinli007.whit"
+description = "git 改动查看与提交工具（仿 VS Code 源代码管理）"
+before-packaging-command = "cargo build --release"
+out-dir = "target/packager"
+formats = ["app", "dmg"]
+category = "DeveloperTool"
+icons = ["assets/whit.icns"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "12.0"
+# Ad-hoc signature: enough for this machine; distribution needs a real identity.
+signing-identity = "-"
+
+# Split columns that each clip their code and scroll sideways together, like
+# VS Code; upstream sizes each column to the longest line. The change is kept
+# in patches/gpui-component-split-scroll.patch for re-applying on upgrades.
+[patch.crates-io]
+gpui-component = { path = "vendor/gpui-component" }

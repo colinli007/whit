@@ -1,0 +1,30 @@
+schema: spec-driven
+
+context: |
+  项目：Whit，一个 git 改动查看与提交的桌面应用。用户用 Claude/Codex CLI 写代码，需要一个快速查看改动、
+    并像 VS Code 源代码管理面板那样暂存、提交、推送的工具（参照 VS Code 1.117 的布局与交互，Dark Modern 深色配色）。
+  功能边界：打开文件夹（含欢迎页与最近项目）→ 查看 git 改动（左右对照）→ 暂存 / 取消暂存 / 放弃更改 / 提交 / 拉取 / 推送 / 同步，
+    以及 VS Code 的分支操作（签出、创建、重命名、删除、合并、变基、发布分支），交互基于 VS Code 式的快速选择框。
+    目标是逐步对齐 VS Code 源代码管理「…」菜单的功能；储藏、标记、远程管理排在下一期，克隆、工作树不做。
+    diff 范围：工作区未提交改动（按暂存的更改 / 更改 / 合并更改分组）、提交历史、分支对比。
+    除此之外的功能（编辑文件、内置终端（只提供 ⌘J 用外部 Ghostty 打开仓库目录）、LSP、搜索替换、命令面板、冲突解决界面、按行暂存）一律不做，除非用户明确提出。
+  技术栈（已定）：
+    - Rust 单 crate 起步，性能优先。
+    - 界面：只依赖总包 `gpui-kit`（longbridge/gpui-kit，Apache-2.0），由它带入 gpui-component 和精确锁定的 `gpui-pre =0.3.12`。
+      gpui-pre 是 Zed 主干 gpui 的每周快照（0.3.12 对应 Zed 2026-11-08 的代码），是 crates.io 上最新的 gpui；
+      官方 `gpui` 包停在 2025-10 的 0.2.2，不用。两者必须一起升级。
+    - diff 展示：gpui-component 自带的只读 `diff` 组件（左右对照、词级高亮、未改动行折叠/展开、虚拟滚动），
+      它的输入是 unified patch 文本，不自己算差异。
+    - 读 git 数据：调用本机 git 命令（与 Zed 一致，保证和终端里 git 的结果一致、支持 reftable 等新特性），不用 gix / git2。
+    - 打包：cargo-packager。
+  许可证：只参考 Zed 的做法，不复制 Zed 中 GPL 许可的代码（buffer_diff、editor、git、git_ui 等）。
+  所有 OpenSpec 文档使用简体中文。
+
+rules:
+  proposal:
+    - 必须包含「不做的事」小节，明确本期不实现的功能
+  design:
+    - 涉及性能的决定要说明瓶颈在哪、用什么信号/数据结构解决，避免靠猜
+    - 参考 Zed 的做法时注明出处（文件路径），并说明是重写而非复制
+  tasks:
+    - 每组任务结束都要有可验证的检查点（cargo check / cargo clippy -- -D warnings / cargo test 通过、应用能启动并看到预期界面）
