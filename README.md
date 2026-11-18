@@ -21,6 +21,17 @@ git 改动查看与提交工具，布局和交互参照 VS Code 的源代码管�
 - 签出时选「强制签出」会丢掉全部未提交的改动并删除未跟踪文件；删除未完全合并的分支前会再确认一次。
 - 最近项目列表保存在 `~/Library/Application Support/Whit/recent.json`。
 
+## 下载安装
+
+在 [Releases](https://github.com/colinli007/whit/releases/latest) 下载 `.dmg`：Apple 芯片选 `aarch64`，Intel 选 `x64`。需要 macOS 12 及以上，本机装有 `git`。
+
+打开 `.dmg`，把 Whit 拖进「应用程序」。安装包没有经过 Apple 公证，第一次打开会提示「无法验证开发者」，二选一：
+
+- 在「系统设置 → 隐私与安全性」底部点「仍要打开」；
+- 或在终端执行 `xattr -dr com.apple.quarantine /Applications/Whit.app`，之后正常双击打开。
+
+发布新版本：改 `Cargo.toml` 的 `version` 并提交，然后推送同名标签（如 `git tag v0.2.0 && git push origin v0.2.0`），GitHub Actions 会打出两种架构的 `.dmg` 并附到这个标签的 Release 上。
+
 ## 构建前提
 
 - Rust（stable，edition 2024）
