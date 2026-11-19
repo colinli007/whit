@@ -10,6 +10,13 @@ adapts the following works, which keep their own licenses.
 (`vendor/gpui-component/LICENSE-APACHE`). Whit modifies it: each changed file
 says so at its top, and `patches/` holds every change against the release.
 
+## gpui-base
+
+`vendor/gpui-base` is a copy of gpui-base 0.9.1 from the same repository,
+Copyright 2024 - 2026 Longbridge, licensed under the Apache License 2.0
+(`vendor/gpui-base/LICENSE-APACHE`). Whit modifies it in the same way: each
+changed file says so at its top, and `patches/` holds every change.
+
 ## Visual Studio Code
 
 Parts of Whit follow the source of [Visual Studio Code](https://github.com/microsoft/vscode)

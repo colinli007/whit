@@ -1,180 +1,400 @@
-//! The editor area: one tab for the open file, its path as breadcrumbs, and
-//! the diff of the group it was opened from.
+//! The editor area: the tabs, the active tab's path as breadcrumbs, and its
+//! content, a diff or a file to edit.
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffHunkSeparator, DiffMode},
-    h_flex, v_flex,
+    h_flex,
+    input::Editor,
+    v_flex,
 };
 use gpui_kit::{TestSupportExt as _, prelude::FluentBuilder as _, *};
 
-use super::{LoadState, Repository, Workbench};
+use super::{
+    LoadState, Repository, Workbench,
+    editor_group::{TabKey, display_path, home_dir},
+    file_buffer::{Content, FileBuffer},
+};
 use crate::{file_icons, git::ChangeGroup, theme};
 
+/// VS Code's notice for a file its editor cannot show.
+pub(super) const UNSUPPORTED_FILE: &str =
+    "此文件是二进制文件或使用了不支持的文本编码，所以无法在编辑器中显示。";
+
+/// What a tab shows of itself.
+struct TabLabel {
+    title: SharedString,
+    /// The folder, for telling apart open files of the same name.
+    folder: Option<SharedString>,
+    /// A diff's status letter.
+    letter: Option<(&'static str, Hsla)>,
+    dirty: bool,
+    deleted: bool,
+}
+
 impl Workbench {
-    pub(super) fn render_editor(
-        &self,
-        repository: &Repository,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// The editor area. With no folder open and no tab, it shows the
+    /// welcome page, as Zed's empty pane does (`crates/workspace/src/
+    /// pane.rs`, the welcome page in the placeholder of a pane without
+    /// worktrees).
+    pub(super) fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let repository = self.repository.as_ref();
+        let active = self.editors.group.active().cloned();
+        if repository.is_none() && active.is_none() {
+            return self.render_welcome(cx).into_any_element();
+        }
         let (danger, muted, background) = {
             let theme = cx.theme();
             (theme.danger, theme.muted_foreground, theme.background)
         };
-        let open = repository.open_file();
-        let message = match &repository.load_state {
-            LoadState::Failed(message) => Some((message.clone(), danger)),
-            LoadState::Loading if repository.snapshot.is_none() => {
-                Some(("正在读取改动…".into(), muted))
+        let message = repository.and_then(|repository| {
+            match (&repository.load_state, &active) {
+                (_, Some(TabKey::File(_) | TabKey::Settings)) => None,
+                (LoadState::Failed(message), _) => Some((message.clone(), danger)),
+                (LoadState::Loading, _) if repository.snapshot.is_none() => {
+                    Some(("正在读取改动…".into(), muted))
+                }
+                (_, None) if repository.files().is_empty() => {
+                    Some(("没有未提交的改动".into(), muted))
+                }
+                (_, None) => Some(("在左侧选择一个文件".into(), muted)),
+                _ => None,
             }
-            _ if repository.files().is_empty() => Some(("没有未提交的改动".into(), muted)),
-            _ if open.is_none() => Some(("在左侧选择一个文件查看改动".into(), muted)),
-            _ => None,
-        };
-        let header = open.map(|changed| {
-            (
-                self.render_tab_bar(repository, cx),
-                render_breadcrumbs(changed.file.path(), cx),
-            )
         });
+        let file = self
+            .editors
+            .active_buffer()
+            .map(|buffer| render_file(buffer, cx));
+        let settings = matches!(active, Some(TabKey::Settings))
+            .then(|| self.editors.settings.as_ref())
+            .flatten()
+            .map(|open| open.editor.clone());
 
         v_flex()
             .size_full()
             .bg(background)
-            .when_some(header, |this, (tab_bar, breadcrumbs)| {
-                this.child(tab_bar).child(breadcrumbs)
+            .when_some(active, |this, active| {
+                let path = self.tab_path(&active);
+                // The settings page has no path to show.
+                let breadcrumbs = !matches!(active, TabKey::Settings);
+                this.child(self.render_tab_bar(&active, cx))
+                    .when(breadcrumbs, |this| this.child(render_breadcrumbs(&path, cx)))
             })
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    // The diff stays mounted even while there is nothing to
-                    // show: it measures its viewport while painting and asks
-                    // for a relayout from there, which GPUI drops mid-draw.
-                    // Mounting it only once a file opens can leave it blank
-                    // until some unrelated event redraws the window.
-                    .child(
-                        Diff::new(&repository.diff)
-                            .size_full()
-                            .header_visible(false)
-                            .hunk_separator(DiffHunkSeparator::LineInfo)
-                            .change_colors(theme::colors::diff())
-                            // VS Code's macOS line height: the font size times 1.5.
-                            .line_height_ratio(1.5)
-                            .guides(theme::colors::guides())
-                            .overview_ruler(true)
-                            .border_0(),
-                    )
-                    .when_some(message, |this, (message, color)| {
+                    // The diff stays mounted even while a file tab or nothing
+                    // is shown: it measures its viewport while painting and
+                    // asks for a relayout from there, which GPUI drops
+                    // mid-draw. Mounting it only once a diff tab is active can
+                    // leave it blank until some unrelated event redraws.
+                    .when_some(repository, |this, repository| {
                         this.child(
-                            v_flex()
-                                .id("diff-message")
-                                .test_support()
-                                .aria_label(message.clone())
-                                .absolute()
-                                .inset_0()
-                                .items_center()
-                                .justify_center()
-                                .bg(background)
-                                .text_color(color)
-                                .child(message),
+                            Diff::new(&repository.diff)
+                                .size_full()
+                                .header_visible(false)
+                                .hunk_separator(DiffHunkSeparator::LineInfo)
+                                .change_colors(theme::colors::diff())
+                                // VS Code's macOS line height: the font size times 1.5.
+                                .line_height_ratio(1.5)
+                                .guides(theme::colors::guides())
+                                .overview_ruler(true)
+                                .border_0(),
                         )
+                    })
+                    .when_some(file, |this, file| {
+                        this.child(div().absolute().inset_0().bg(background).child(file))
+                    })
+                    .when_some(settings, |this, settings| {
+                        this.child(div().absolute().inset_0().bg(background).child(settings))
+                    })
+                    .when_some(message, |this, (message, color)| {
+                        this.child(centered_message("diff-message", message, color, background))
                     }),
             )
+            .into_any_element()
     }
 
-    fn render_tab_bar(&self, repository: &Repository, cx: &mut Context<Self>) -> AnyElement {
+    /// How a tab's path shows: a diff's as git names it, a file's relative
+    /// to the repository or from `~` outside it.
+    fn tab_path(&self, key: &TabKey) -> SharedString {
+        match key {
+            TabKey::Diff { path, .. } => path.clone(),
+            TabKey::Settings => "设置".into(),
+            TabKey::File(path) => {
+                let root = self.repository.as_ref().map(|repository| repository.root.as_path());
+                display_path(path, root, home_dir().as_deref()).into()
+            }
+        }
+    }
+
+    fn render_tab_bar(&self, active: &TabKey, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let Some(changed) = repository.open_file() else {
-            return div().into_any_element();
+        let tab_bar = theme.tab_bar;
+        let tabs: Vec<AnyElement> = self
+            .editors
+            .group
+            .tabs()
+            .iter()
+            .map(|key| {
+                let label = self.tab_label(key, cx);
+                self.render_tab(key, key == active, label, cx)
+            })
+            .collect();
+        let tools = match active {
+            TabKey::Diff { .. } => self
+                .repository
+                .as_ref()
+                .map(|repository| self.render_diff_tools(repository, cx)),
+            TabKey::Settings => Some(render_settings_tools(cx)),
+            TabKey::File(_) => None,
         };
-        let name = changed
-            .file
-            .path()
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        let side = match changed.group {
-            ChangeGroup::Staged => "索引",
-            ChangeGroup::Changes | ChangeGroup::Merge => "工作树",
-        };
-        let title: SharedString = format!("{name} ({side})").into();
-        let split = repository.diff.read(cx).mode() == DiffMode::Split;
 
         h_flex()
             .h(px(35.))
             .flex_none()
-            .bg(theme.tab_bar)
+            .bg(tab_bar)
             .child(
                 h_flex()
-                    .id("editor-tab")
-                    .test_support()
-                    .aria_label(title.clone())
+                    .id("editor-tabs")
                     .h_full()
-                    .pl(px(10.))
-                    .pr(px(6.))
-                    .gap(px(6.))
-                    .bg(theme.tab_active)
-                    .text_color(theme.tab_active_foreground)
-                    .border_r_1()
-                    .border_color(theme::colors::tab_border())
-                    .child(img(file_icons::icon_for(changed.file.path())).size(px(16.)))
-                    .child(title)
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(changed.letter.color())
-                            .child(changed.letter.as_str()),
-                    )
-                    .child(
-                        Button::new("close-editor")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(Lucide::X))
-                            .tooltip("关闭")
-                            .on_click(cx.listener(|this, _, _, cx| this.close_editor(cx))),
-                    ),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.editors.tab_scroll)
+                    .children(tabs),
             )
-            .child(div().flex_1())
+            .children(tools)
+            .into_any_element()
+    }
+
+    fn render_tab(
+        &self,
+        key: &TabKey,
+        is_active: bool,
+        label: TabLabel,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (background, foreground) = if is_active {
+            (theme.tab_active, theme.tab_active_foreground)
+        } else {
+            (theme.tab, theme.tab_foreground)
+        };
+        let muted = theme.muted_foreground;
+        let hovered = self.editors.hovered_tab.as_ref() == Some(key);
+        let id = tab_id(key);
+        let id = id.as_ref();
+        let path = self.tab_path(key);
+        let icon = match key {
+            TabKey::Settings => Icon::new(Lucide::Settings).size(px(16.)).into_any_element(),
+            _ => img(file_icons::icon_for(&path))
+                .size(px(16.))
+                .flex_none()
+                .into_any_element(),
+        };
+        let tooltip: SharedString = if label.deleted {
+            format!("{path} (已删除)").into()
+        } else {
+            path
+        };
+        // VS Code's dirty dot takes the close button's place until the
+        // pointer is over the tab.
+        let slot = if label.dirty && !hovered {
+            div()
+                .id(SharedString::from(format!("{id}-dirty")))
+                .test_support()
+                .size(px(8.))
+                .rounded_full()
+                .bg(foreground)
+                .into_any_element()
+        } else if is_active || hovered {
+            let close = key.clone();
+            Button::new(SharedString::from(format!("{id}-close")))
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(Lucide::X))
+                .tooltip("关闭")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.request_close_tab(close.clone(), window, cx)
+                }))
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        let hover_key = key.clone();
+        let click_key = key.clone();
+        let middle_key = key.clone();
+
+        h_flex()
+            .id(SharedString::from(id.to_owned()))
+            .test_support()
+            .aria_label(label.title.clone())
+            .h_full()
+            .flex_none()
+            .pl(px(10.))
+            .pr(px(4.))
+            .gap(px(6.))
+            .bg(background)
+            .text_color(foreground)
+            .border_r_1()
+            .border_color(theme::colors::tab_border())
+            .cursor_pointer()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let editors = &mut this.editors;
+                let now = hovered.then(|| hover_key.clone());
+                if editors.hovered_tab != now
+                    && (*hovered || editors.hovered_tab.as_ref() == Some(&hover_key))
+                {
+                    editors.hovered_tab = now;
+                    cx.notify();
+                }
+            }))
+            // A double click keeps a preview tab, as in VS Code.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    this.pin_tab(&click_key, cx);
+                }
+                this.activate_tab(&click_key, window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    this.request_close_tab(middle_key.clone(), window, cx)
+                }),
+            )
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .child(icon)
+            .child(
+                div()
+                    .when(self.editors.group.is_preview(key), |this| this.italic())
+                    .when(label.deleted, |this| this.line_through())
+                    .child(label.title),
+            )
+            .when_some(label.folder, |this, folder| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!("{id}-folder")))
+                        .test_support()
+                        .aria_label(folder.clone())
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .child(folder),
+                )
+            })
+            .when_some(label.letter, |this, (letter, color)| {
+                this.child(div().text_size(px(12.)).text_color(color).child(letter))
+            })
             .child(
                 h_flex()
-                    .pr(px(8.))
-                    .gap(px(2.))
-                    .child(
-                        Button::new("previous-change")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowUp)
-                            .tooltip("上一处更改")
-                            .on_click(cx.listener(|this, _, _, cx| this.move_to_change(false, cx))),
-                    )
-                    .child(
-                        Button::new("next-change")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowDown)
-                            .tooltip("下一处更改")
-                            .on_click(cx.listener(|this, _, _, cx| this.move_to_change(true, cx))),
-                    )
-                    .child(
-                        Button::new("toggle-inline")
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(if split {
-                                Lucide::Rows2
-                            } else {
-                                Lucide::Columns2
-                            }))
-                            .tooltip(if split {
-                                "切换为内联视图"
-                            } else {
-                                "切换为并排视图"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_inline(cx))),
-                    ),
+                    .size(px(20.))
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .child(slot),
+            )
+            .into_any_element()
+    }
+
+    fn tab_label(&self, key: &TabKey, cx: &App) -> TabLabel {
+        let title = |key: &TabKey| -> SharedString {
+            let path = self.tab_path(key);
+            let name = path.rsplit('/').next().unwrap_or_default().to_owned();
+            match key {
+                TabKey::File(_) | TabKey::Settings => name.into(),
+                TabKey::Diff { group, .. } => {
+                    let side = match group {
+                        ChangeGroup::Staged => "索引",
+                        ChangeGroup::Changes | ChangeGroup::Merge => "工作树",
+                    };
+                    format!("{name} ({side})").into()
+                }
+            }
+        };
+        let own = title(key);
+        // VS Code adds the folder when another open tab has the same label.
+        let folder = self
+            .editors
+            .group
+            .tabs()
+            .iter()
+            .any(|other| other != key && title(other) == own)
+            .then(|| {
+                self.tab_path(key)
+                    .rsplit_once('/')
+                    .map(|(folder, _)| folder.to_owned().into())
+            })
+            .flatten();
+        let (letter, dirty, deleted) = match key {
+            TabKey::Diff { group, path } => (
+                self.repository
+                    .as_ref()
+                    .and_then(|repository| repository.file(*group, path))
+                    .map(|changed| (changed.letter.as_str(), changed.letter.color())),
+                false,
+                false,
+            ),
+            TabKey::Settings => (None, false, false),
+            TabKey::File(path) => {
+                let buffer = self.editors.buffers.get(path).map(|open| open.buffer.read(cx));
+                (
+                    None,
+                    buffer.is_some_and(|buffer| buffer.is_dirty(cx)),
+                    buffer.is_some_and(FileBuffer::is_deleted),
+                )
+            }
+        };
+        TabLabel {
+            title: own,
+            folder,
+            letter,
+            dirty,
+            deleted,
+        }
+    }
+
+    fn render_diff_tools(&self, repository: &Repository, cx: &mut Context<Self>) -> AnyElement {
+        let split = repository.diff.read(cx).mode() == DiffMode::Split;
+        h_flex()
+            .pr(px(8.))
+            .gap(px(2.))
+            .child(
+                Button::new("previous-change")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ArrowUp)
+                    .tooltip("上一处更改")
+                    .on_click(cx.listener(|this, _, _, cx| this.move_to_change(false, cx))),
+            )
+            .child(
+                Button::new("next-change")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ArrowDown)
+                    .tooltip("下一处更改")
+                    .on_click(cx.listener(|this, _, _, cx| this.move_to_change(true, cx))),
+            )
+            .child(
+                Button::new("toggle-inline")
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(if split {
+                        Lucide::Rows2
+                    } else {
+                        Lucide::Columns2
+                    }))
+                    .tooltip(if split {
+                        "切换为内联视图"
+                    } else {
+                        "切换为并排视图"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inline(cx))),
             )
             .into_any_element()
     }
@@ -202,6 +422,74 @@ impl Workbench {
             });
         }
     }
+}
+
+/// The element id of a tab, by what it shows.
+pub(super) fn tab_id(key: &TabKey) -> SharedString {
+    match key {
+        TabKey::File(path) => format!("tab-file-{}", path.display()).into(),
+        TabKey::Diff { group, path } => format!("tab-{}-{path}", group.key()).into(),
+        TabKey::Settings => "tab-settings".into(),
+    }
+}
+
+/// The settings tab's button: VS Code's 「打开设置(JSON)」 `{}`.
+fn render_settings_tools(cx: &mut Context<Workbench>) -> AnyElement {
+    h_flex()
+        .pr(px(8.))
+        .child(
+            Button::new("settings-open-json")
+                .ghost()
+                .small()
+                .icon(Icon::new(Lucide::Braces))
+                .tooltip("打开设置(JSON)")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_user_settings_json(&crate::OpenUserSettingsJson, window, cx)
+                })),
+        )
+        .into_any_element()
+}
+
+/// A file tab's content: its editor, or why there is none.
+fn render_file(buffer: &Entity<FileBuffer>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (muted, danger, background) = (theme.muted_foreground, theme.danger, theme.background);
+    let buffer = buffer.read(cx);
+    match buffer.content() {
+        Content::Loading => div().into_any_element(),
+        Content::Text(_) => Editor::new(buffer.editor().expect("text has an editor"))
+            .size_full()
+            .bordered(false)
+            .appearance(false)
+            .into_any_element(),
+        Content::Unsupported => {
+            centered_message("file-message", UNSUPPORTED_FILE.into(), muted, background)
+        }
+        Content::Failed(reason) => {
+            centered_message("file-message", reason.clone(), danger, background)
+        }
+    }
+}
+
+fn centered_message(
+    id: &'static str,
+    message: SharedString,
+    color: Hsla,
+    background: Hsla,
+) -> AnyElement {
+    v_flex()
+        .id(id)
+        .test_support()
+        .aria_label(message.clone())
+        .absolute()
+        .inset_0()
+        .items_center()
+        .justify_center()
+        .px(px(20.))
+        .bg(background)
+        .text_color(color)
+        .child(message)
+        .into_any_element()
 }
 
 /// The open file's path, folder by folder, as VS Code's breadcrumbs.

@@ -100,6 +100,9 @@ def main():
     languages = present(theme["languageIds"])
     table = {
         "file": svg(theme["file"]),
+        # The explorer's folders: the default pair only, closed and open.
+        "folder": svg(theme["folder"]),
+        "folderExpanded": svg(theme["folderExpanded"]),
         "fileNames": {name.lower(): icon for name, icon in present(theme["fileNames"]).items()},
         "fileExtensions": {ext.lower(): icon for ext, icon in present(theme["fileExtensions"]).items()},
         # Languages without an icon would fall back to the default anyway.
@@ -111,7 +114,8 @@ def main():
     if OUT.exists():
         shutil.rmtree(OUT)
     (OUT / "icons").mkdir(parents=True)
-    used = {table["file"], *table["fileNames"].values(), *table["fileExtensions"].values()}
+    used = {table["file"], table["folder"], table["folderExpanded"]}
+    used |= {*table["fileNames"].values(), *table["fileExtensions"].values()}
     used |= set(languages.values())
     for name in sorted(used):
         shutil.copy(icons_extension / "icons" / name, OUT / "icons" / name)

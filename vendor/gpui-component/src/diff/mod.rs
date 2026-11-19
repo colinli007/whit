@@ -19,7 +19,7 @@ pub use decoration::{DiffDecoration, DiffGutterMarker};
 pub use document::{DiffFile, DiffFileStatus, DiffLinePosition, DiffLineRange, DiffSide};
 pub use guides::DiffGuideColors;
 pub use parser::{DiffParseError, DiffParseOptions};
-pub use presentation::DiffInlineUnit;
+pub use presentation::{DiffInlineUnit, detected_language};
 pub use state::{DiffEvent, DiffState};
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};

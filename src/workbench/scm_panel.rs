@@ -13,21 +13,18 @@ use gpui_kit::component::{
 };
 use gpui_kit::{TestSupportExt as _, prelude::FluentBuilder as _, *};
 
-use super::{Repository, Workbench, paths_of};
+use super::{Repository, Workbench, editor_group::TabKey, paths_of};
 use crate::{
     AbortMerge, AbortRebase, Checkout, Commit, CommitAmend, CommitAndPush, CommitAndSync,
     CreateBranch, CreateBranchFrom, DeleteBranch, DeleteRemoteBranch, DiscardAll, Fetch,
     MergeBranch, PublishBranch, Pull, Push, RebaseBranch, RenameBranch, StageAll, Sync, UnstageAll,
     file_icons,
     git::{ChangeGroup, ChangedFile, Head, InProgress, StatusLetter},
-    settings,
+    settings::{self, SettingsStore},
     theme::colors,
 };
 
 const ROW_HEIGHT: f32 = 22.;
-/// Left inset of the title: VS Code's `.part > .title` 8px padding plus the
-/// `.title-label` 12px.
-const TITLE_INSET_LEFT: f32 = 20.;
 /// Left inset of the message field and the button under it, as VS Code
 /// draws them.
 const INSET_LEFT: f32 = 19.;
@@ -54,11 +51,21 @@ impl ChangeGroup {
     }
 
     /// A stable name for element ids and tests.
-    fn key(self) -> &'static str {
+    pub(super) fn key(self) -> &'static str {
         match self {
             ChangeGroup::Merge => "merge",
             ChangeGroup::Staged => "staged",
             ChangeGroup::Changes => "changes",
+        }
+    }
+
+    /// VS Code's `hideWhenEmpty`: the git extension sets it on the merge and
+    /// staged groups, never on the working tree's, which stays as 「更改 0」
+    /// so that staging everything visibly empties it.
+    fn hides_when_empty(self) -> bool {
+        match self {
+            ChangeGroup::Merge | ChangeGroup::Staged => true,
+            ChangeGroup::Changes => false,
         }
     }
 }
@@ -295,32 +302,17 @@ impl Workbench {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (foreground, sidebar, sidebar_border) = {
+        let (sidebar, sidebar_border) = {
             let theme = cx.theme();
-            (theme.foreground, theme.sidebar, theme.sidebar_border)
+            (theme.sidebar, theme.sidebar_border)
         };
         let busy = repository.is_busy();
         let focus = self.focus_handle.clone();
 
-        // A narrow side bar cuts the title short, never its actions.
-        let title = h_flex()
-            .h(px(35.))
-            .flex_none()
-            .pl(px(TITLE_INSET_LEFT))
-            .pr(px(INSET_RIGHT))
-            .gap(px(4.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(foreground)
-                    .child("SOURCE CONTROL"),
-            )
-            .child(
-                h_flex()
+        let actions = h_flex()
                     .flex_none()
+                    .pl(px(4.))
+                    .pr(px(INSET_RIGHT))
                     // `.action-item`'s 4px margin.
                     .gap(px(4.))
                     .child(
@@ -346,8 +338,13 @@ impl Workbench {
                                     more_menu(menu, state, &focus, window, cx)
                                 }
                             }),
-                    ),
-            );
+                    );
+        let title = self.side_bar_title(
+            repository,
+            "SOURCE CONTROL",
+            Some(actions.into_any_element()),
+            cx,
+        );
 
         let message = div()
             .key_context("CommitMessage")
@@ -373,12 +370,16 @@ impl Workbench {
 
         let list_focused = self.scm_list_focus.is_focused(window);
         let mut groups = Vec::new();
-        for group in [
-            ChangeGroup::Merge,
-            ChangeGroup::Staged,
-            ChangeGroup::Changes,
-        ] {
-            groups.extend(self.render_group(repository, group, list_focused, cx));
+        // The groups count what git reported; before its first answer there
+        // is nothing to count, and 「更改 0」 would claim a clean tree.
+        if repository.snapshot.is_some() {
+            for group in [
+                ChangeGroup::Merge,
+                ChangeGroup::Staged,
+                ChangeGroup::Changes,
+            ] {
+                groups.extend(self.render_group(repository, group, list_focused, cx));
+            }
         }
 
         v_flex()
@@ -406,7 +407,7 @@ impl Workbench {
         let busy = repository.is_busy();
         let has_commits = repository.branch().is_some_and(|branch| branch.has_commits);
         let focus = self.focus_handle.clone();
-        match ActionButton::of(repository, self.settings.values()) {
+        match ActionButton::of(repository, SettingsStore::global(cx).values()) {
             ActionButton::Commit { can_commit } => {
                 let disabled = busy || !can_commit;
                 h_flex()
@@ -482,7 +483,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let files: Vec<ChangedFile> = repository.group_files(group).cloned().collect();
-        if files.is_empty() {
+        if files.is_empty() && group.hides_when_empty() {
             return None;
         }
         let list_hover = cx.theme().list_hover;
@@ -534,7 +535,7 @@ impl Workbench {
         let rows = (!collapsed).then(|| {
             files
                 .iter()
-                .map(|changed| self.render_file_row(repository, changed, busy, list_focused, cx))
+                .map(|changed| self.render_file_row(changed, busy, list_focused, cx))
                 .collect::<Vec<_>>()
         });
         Some(
@@ -628,7 +629,6 @@ impl Workbench {
 
     fn render_file_row(
         &self,
-        repository: &Repository,
         changed: &ChangedFile,
         busy: bool,
         list_focused: bool,
@@ -645,10 +645,9 @@ impl Workbench {
         };
         let group = changed.group;
         let path = changed.file.path().clone();
-        let selected = repository
-            .open
-            .as_ref()
-            .is_some_and(|open| open.group == group && open.path == path);
+        let selected = self
+            .active_diff()
+            .is_some_and(|active| active.group == group && active.file.path() == &path);
         let (directory, name) = match path.rsplit_once('/') {
             Some((directory, name)) => (directory.to_owned(), name.to_owned()),
             None => (String::new(), path.to_string()),
@@ -723,9 +722,14 @@ impl Workbench {
             .when_some(rename, |this, rename| {
                 this.tooltip(move |window, cx| Tooltip::new(rename.clone()).build(window, cx))
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
+            // A click opens a preview tab, a double click one for good.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 window.focus(&this.scm_list_focus, cx);
-                this.open_change(group, open_path.clone(), cx)
+                let key = TabKey::Diff {
+                    group,
+                    path: open_path.clone(),
+                };
+                this.open_tab(key, event.click_count() < 2, window, cx)
             }))
             .into_any_element()
     }
@@ -750,9 +754,11 @@ impl Workbench {
                     "打开文件",
                     false,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.open_with_system(path.clone(), cx)
+                    if let Some(key) = this.file_key(&path) {
+                        this.open_tab(key, false, window, cx)
+                    }
                 }))
                 .into_any_element(),
             );

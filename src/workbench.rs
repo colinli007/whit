@@ -1,18 +1,27 @@
 //! The window: the welcome page until a repository is open, then VS Code's
 //! Source Control layout — the side bar, the diff editor and the status bar.
 //! Each area renders from its own file; they share this one state.
+mod activity_bar;
 mod branches;
 mod editor;
+mod editor_group;
+mod explorer;
+mod explorer_panel;
+mod file_buffer;
+mod outside_files;
 mod quick_input;
 mod relative_time;
 mod scm_panel;
+mod settings_editor;
 mod status_bar;
+mod user_settings;
 mod welcome;
 
 #[cfg(test)]
 mod tests;
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -20,24 +29,36 @@ use std::{
 use futures_channel::oneshot;
 use gpui_kit::component::{
     ActiveTheme as _, WindowExt as _,
+    button::Button,
     diff::{DiffMode, DiffState},
     input::TextareaState,
     notification::Notification,
+    h_flex,
     resizable::{h_resizable, resizable_panel},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
 use crate::{
-    APP_NAME, AbortMerge, AbortRebase, About, Checkout, CloseFolder, Commit, CommitAmend,
+    APP_NAME, AbortMerge, AbortRebase, About, Checkout, CloseActiveTab, CloseFolder, Commit,
+    Quit,
+    CommitAmend,
     CommitAndPush, CommitAndSync, CreateBranch, CreateBranchFrom, DeleteBranch, DeleteRemoteBranch,
     DiscardAll, Fetch, MergeBranch, OpenFolder, OpenTerminal, PublishBranch, Pull, Push,
-    RebaseBranch, Refresh, RenameBranch, StageAll, Sync, UnstageAll,
+    RebaseBranch, Refresh, RenameBranch, Save, StageAll, Sync, UnstageAll,
     git::{self, BranchStatus, ChangeGroup, ChangedFile, GitError, Head, Snapshot},
+    workbench::{
+        editor_group::{EditorGroup, Opened, TabKey},
+        explorer::{Decorations, Explorer},
+        file_buffer::{FileBuffer, FileBufferEvent, SaveError},
+    },
     recent::RecentFolders,
-    settings::Settings,
+    settings::SettingsStore,
     terminal,
+    watcher::{self, Batch},
 };
+
+pub use settings_editor::SETTINGS_EDITOR_CONTEXT;
 
 /// The key context of the commit message field, for its cmd-enter binding.
 pub const COMMIT_MESSAGE_CONTEXT: &str = "CommitMessage > Input";
@@ -50,46 +71,133 @@ pub struct Workbench {
     /// The side bar row or group header under the pointer, which shows its
     /// actions.
     scm_hovered_row: Option<SharedString>,
+    /// The explorer's tree, for its keys and its focused selection.
+    explorer_focus: FocusHandle,
+    /// Whether the pointer is over the explorer's tree, which then shows its
+    /// indent guides.
+    explorer_hovered: bool,
     recent: RecentFolders,
-    settings: Settings,
+    /// Whether the notice about a settings file that does not parse is up.
+    settings_error_shown: bool,
+    /// The editor area. It belongs to the window, not to the repository:
+    /// it is there with no folder open, and a tab that shows no file of the
+    /// repository stays when another folder opens.
+    editors: Editors,
+    /// Watches the folders of files open from outside the repository.
+    outside_watcher: Option<outside_files::OutsideWatcher>,
     /// Whether the welcome page lists every recent folder or only the first ten.
     show_all_recent: bool,
     repository: Option<Repository>,
     /// Why the last folder could not be opened, shown on the welcome page.
     open_error: Option<SharedString>,
     opening: Task<()>,
-    /// Set when the window loses focus. Only a return after leaving can mean
-    /// the files changed elsewhere; the activation that follows opening the
-    /// window would just repeat the load the opening already started.
-    left_window: bool,
     /// The picker or input box dropped from the top, with its dismissal
     /// subscription.
     quick_input: Option<(quick_input::QuickInput, Subscription)>,
     _activation: Subscription,
+    _settings_observation: Subscription,
+}
+
+/// The view the side bar shows, picked in the activity bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SideView {
+    Explorer,
+    SourceControl,
 }
 
 struct Repository {
     root: PathBuf,
-    /// Holds only the open file: the editor shows one file at a time.
+    side_view: SideView,
+    explorer: Explorer,
+    explorer_scroll: UniformListScrollHandle,
+    /// Whether the folder's section in the explorer is folded away.
+    explorer_collapsed: bool,
+    /// The git colors of the explorer, from the latest snapshot.
+    decorations: Decorations,
+    /// Holds the file of one diff tab at a time, the active one's or the
+    /// last one shown; every diff tab shares it.
     diff: Entity<DiffState>,
+    /// The patch in `diff` now. Putting the same patch in again would reset
+    /// its scroll position, expanded folds and selection.
+    shown_patch: Option<Arc<str>>,
     message: Entity<TextareaState>,
     load_state: LoadState,
     snapshot: Option<Snapshot>,
-    /// The file in the editor; a file may be in two groups at once.
-    open: Option<OpenFile>,
     collapsed_groups: Vec<ChangeGroup>,
     /// The repository change in progress; only one runs at a time.
     operation: Option<RunningOperation>,
     /// Replacing this task cancels a refresh still in flight, so only the
     /// latest refresh can ever update the view.
     refresh_task: Task<()>,
+    /// Owns the file watcher and takes in its batches; dropped with the
+    /// repository, which stops the watching.
+    _watching: Task<()>,
     _diff_observation: Subscription,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct OpenFile {
-    group: ChangeGroup,
-    path: SharedString,
+/// The tabs of the editor area and what its file tabs hold.
+#[derive(Default)]
+struct Editors {
+    group: EditorGroup,
+    /// The buffer of every file tab, by its absolute path.
+    buffers: HashMap<Arc<Path>, OpenBuffer>,
+    /// The tab under the pointer, which shows its close button.
+    hovered_tab: Option<TabKey>,
+    /// The tab bar's horizontal scrolling, which keeps the active tab in view.
+    tab_scroll: ScrollHandle,
+    /// The settings page, while its tab is open.
+    settings: Option<OpenSettingsEditor>,
+}
+
+struct OpenSettingsEditor {
+    editor: Entity<settings_editor::SettingsEditor>,
+    _subscription: Subscription,
+}
+
+struct OpenBuffer {
+    buffer: Entity<FileBuffer>,
+    _subscriptions: [Subscription; 2],
+}
+
+impl Editors {
+    /// The buffer of the active tab, when that is a file tab.
+    fn active_buffer(&self) -> Option<&Entity<FileBuffer>> {
+        match self.group.active()? {
+            TabKey::File(path) => self.buffers.get(path).map(|open| &open.buffer),
+            TabKey::Diff { .. } | TabKey::Settings => None,
+        }
+    }
+
+    /// Closes `key` and drops what it held.
+    fn close(&mut self, key: &TabKey) {
+        self.group.close(key);
+        self.tab_gone(key);
+    }
+
+    /// Drops what a closed or replaced tab held.
+    fn tab_gone(&mut self, key: &TabKey) {
+        match key {
+            TabKey::File(path) => {
+                self.buffers.remove(path);
+            }
+            TabKey::Settings => self.settings = None,
+            TabKey::Diff { .. } => {}
+        }
+        if self.hovered_tab.as_ref() == Some(key) {
+            self.hovered_tab = None;
+        }
+    }
+
+    /// Scrolls the active tab into view.
+    fn scroll_to_active(&self) {
+        if let Some(ix) = self
+            .group
+            .active()
+            .and_then(|active| self.group.tabs().iter().position(|tab| tab == active))
+        {
+            self.tab_scroll.scroll_to_item(ix);
+        }
+    }
 }
 
 enum LoadState {
@@ -184,14 +292,30 @@ impl Repository {
         self.snapshot.as_ref().map(|snapshot| &snapshot.branch)
     }
 
-    fn file(&self, open: &OpenFile) -> Option<&ChangedFile> {
+    fn file(&self, group: ChangeGroup, path: &str) -> Option<&ChangedFile> {
         self.files()
             .iter()
-            .find(|changed| changed.group == open.group && changed.file.path() == &open.path)
+            .find(|changed| changed.group == group && changed.file.path().as_ref() == path)
     }
 
-    fn open_file(&self) -> Option<&ChangedFile> {
-        self.file(self.open.as_ref()?)
+    /// The changed file `active` shows, when that is a diff tab.
+    fn diff_of(&self, active: Option<&TabKey>) -> Option<&ChangedFile> {
+        match active? {
+            TabKey::Diff { group, path } => self.file(*group, path),
+            TabKey::File(_) | TabKey::Settings => None,
+        }
+    }
+
+    /// `path` relative to the root, `/`-separated, when it is inside.
+    fn relative(&self, path: &Path) -> Option<String> {
+        let relative = path.strip_prefix(&self.root).ok()?;
+        Some(
+            relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
     }
 
     fn group_files(&self, group: ChangeGroup) -> impl Iterator<Item = &ChangedFile> {
@@ -211,23 +335,24 @@ impl Repository {
             .is_some_and(|running| running.operation.is_remote())
     }
 
-    /// Puts the open file in the diff unless `shown`, the patch on screen,
-    /// already is its patch: replacing the file resets the scroll position,
-    /// expanded folds and line selection.
-    fn show_open(&self, shown: Option<Arc<str>>, cx: &mut App) {
-        let open = self.open_file();
-        if open.map(|changed| &changed.patch) == shown.as_ref() {
+    /// Puts the active diff tab's file in the diff unless its patch is there
+    /// already. A file tab leaves the diff as it is, so switching back to the
+    /// diff tab finds it where it was.
+    fn show_active_diff(&mut self, active: Option<&TabKey>, cx: &mut App) {
+        if matches!(active, Some(TabKey::File(_) | TabKey::Settings)) {
             return;
         }
-        let files: Vec<_> = open
+        let active = self.diff_of(active);
+        let patch = active.map(|changed| changed.patch.clone());
+        if patch == self.shown_patch {
+            return;
+        }
+        let files: Vec<_> = active
             .map(|changed| changed.file.clone())
             .into_iter()
             .collect();
         self.diff.update(cx, |diff, cx| diff.set_files(files, cx));
-    }
-
-    fn shown_patch(&self) -> Option<Arc<str>> {
-        self.open_file().map(|changed| changed.patch.clone())
+        self.shown_patch = patch;
     }
 }
 
@@ -244,37 +369,67 @@ impl Workbench {
     pub fn new(
         initial_folder: Option<PathBuf>,
         recent: RecentFolders,
-        settings: Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-        // The typical flow is switching to a terminal where a CLI edits files and
-        // switching back, so regaining focus is exactly when the diff goes stale.
+        // A picker closes when the window loses focus, as in VS Code. Changes
+        // made elsewhere arrive through the file watcher, not on returning.
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if !window.is_window_active() {
-                this.left_window = true;
                 this.dismiss_picker_on_blur(window, cx);
-            } else if this.left_window {
-                this.left_window = false;
-                this.refresh(window, cx);
             }
+        });
+        // The window's close button asks about unsaved edits first.
+        let view_handle = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(view) = view_handle.upgrade() else {
+                return true;
+            };
+            view.update(cx, |view, cx| {
+                if view.dirty_files(None, cx).is_empty() {
+                    return true;
+                }
+                let confirmed = view.confirm_unsaved_files(window, cx);
+                cx.spawn_in(window, async move |_, cx| {
+                    if confirmed.await
+                        && let Err(error) = cx.update(|window, _| window.remove_window())
+                    {
+                        log::warn!("window gone before it could close: {error:#}");
+                    }
+                })
+                .detach();
+                false
+            })
         });
         let mut view = Self {
             focus_handle,
             scm_list_focus: cx.focus_handle(),
             scm_hovered_row: None,
+            explorer_focus: cx.focus_handle(),
+            explorer_hovered: false,
             recent,
-            settings,
+            settings_error_shown: false,
+            editors: Editors::default(),
+            outside_watcher: None,
             show_all_recent: false,
             repository: None,
             open_error: None,
             opening: Task::ready(()),
-            left_window: false,
             quick_input: None,
             _activation: activation,
+            // Every setting is read from the store as the window renders.
+            _settings_observation: cx.observe_global_in::<SettingsStore>(
+                window,
+                |this, window, cx| {
+                    this.settings_error_changed(window, cx);
+                    cx.notify();
+                },
+            ),
         };
+        // A file broken before the start is told about once the window is up.
+        cx.defer_in(window, |this, window, cx| this.settings_error_changed(window, cx));
         if let Some(folder) = initial_folder {
             view.open_folder(folder, window, cx);
         }
@@ -313,8 +468,19 @@ impl Workbench {
         self.opening = cx.spawn_in(window, async move |this, cx| {
             let root = resolve_root.await;
             let shown = this.update_in(cx, |this, window, cx| match root {
-                Ok(root) => this.show_repository(root, window, cx),
-                Err(error) => this.show_open_error(error.to_string().into(), window, cx),
+                Ok(root) => this.after_unsaved_files(
+                    move |this, window, cx| this.show_repository(root, window, cx),
+                    window,
+                    cx,
+                ),
+                Err(error) => {
+                    let message = SharedString::from(error.to_string());
+                    this.after_unsaved_files(
+                        move |this, window, cx| this.show_open_error(message, window, cx),
+                        window,
+                        cx,
+                    )
+                }
             });
             if let Err(error) = shown {
                 log::warn!("view released before showing repository: {error:#}");
@@ -338,7 +504,11 @@ impl Workbench {
         self.opening = cx.spawn_in(window, async move |this, cx| {
             let root = resolve_root.await;
             let shown = this.update_in(cx, |this, window, cx| match root {
-                Ok(root) => this.show_repository(root, window, cx),
+                Ok(root) => this.after_unsaved_files(
+                    move |this, window, cx| this.show_repository(root, window, cx),
+                    window,
+                    cx,
+                ),
                 Err(reason) => this.offer_to_forget(folder, reason, window, cx),
             });
             if let Err(error) = shown {
@@ -375,7 +545,153 @@ impl Workbench {
         .detach();
     }
 
+    /// Watches the repository at `root` and takes in what changes.
+    ///
+    /// Not in unit tests: their scheduler is deterministic and refuses
+    /// wake-ups from the watcher's thread, so they hand batches to
+    /// `files_changed` themselves; the screenshot tests run the real one.
+    #[cfg(test)]
+    fn watch(_: PathBuf, _: &mut Window, _: &mut Context<Self>) -> Task<()> {
+        Task::ready(())
+    }
+
+    /// Watches the repository at `root` and takes in what changes.
+    #[cfg(not(test))]
+    fn watch(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        let dirs = cx.background_spawn({
+            let root = root.clone();
+            async move { git::git_dirs(&root) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let dirs = dirs.await.unwrap_or_else(|error| {
+                log::warn!("git folder unknown, watching the working tree only: {error}");
+                Vec::new()
+            });
+            let (watcher, batches) = match watcher::RepositoryWatcher::new(&root, &dirs) {
+                Ok(watching) => watching,
+                Err(error) => {
+                    log::error!("cannot watch {}: {error}", root.display());
+                    return;
+                }
+            };
+            while let Ok(batch) = batches.recv().await {
+                if this
+                    .update_in(cx, |this, window, cx| this.files_changed(&batch, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            drop(watcher);
+        })
+    }
+
+    /// Follows changes made on disk, by anyone: reads the changes again
+    /// unless only ignored paths changed, and checks the open files that
+    /// changed (design 5).
+    fn files_changed(&mut self, batch: &Batch, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repository) = self.repository.as_ref() else {
+            return;
+        };
+        let effects = watcher::classify(batch, |path| {
+            repository
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.is_ignored(path))
+        });
+        let changed_buffers: Vec<Entity<FileBuffer>> = self
+            .editors
+            .buffers
+            .iter()
+            .filter(|(path, _)| {
+                effects.everything
+                    || repository
+                        .relative(path)
+                        .is_some_and(|relative| effects.files.contains(&relative))
+            })
+            .map(|(_, open)| open.buffer.clone())
+            .collect();
+        for buffer in changed_buffers {
+            buffer.update(cx, |buffer, cx| buffer.disk_changed(window, cx));
+        }
+        // Folders on screen are read again; ones read before but folded away
+        // are forgotten, to be read when expanded.
+        let Some(repository) = self.repository.as_mut() else {
+            return;
+        };
+        let changed: Vec<String> = if effects.everything {
+            repository.explorer.shown_folders().map(str::to_owned).collect()
+        } else {
+            effects.folders.iter().cloned().collect()
+        };
+        let mut reread = Vec::new();
+        for folder in changed {
+            let shown = folder.is_empty() || repository.explorer.is_expanded(&folder);
+            if shown {
+                reread.push(folder);
+            } else {
+                repository.explorer.forget(&folder);
+            }
+        }
+        if !reread.is_empty() {
+            self.read_folders(reread, None, cx);
+        }
+        if effects.refresh {
+            self.refresh(window, cx);
+        }
+    }
+
+    /// Runs `then`, which drops the open repository, once the unsaved edits
+    /// of its files are saved or given up; nothing happens when the user
+    /// cancels. Files outside it keep their tabs and their edits.
+    fn after_unsaved_files(
+        &mut self,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dirty = match self.repository.as_ref() {
+            Some(repository) => self.dirty_files(Some(&repository.root), cx),
+            None => Vec::new(),
+        };
+        let confirmed = self.confirm_unsaved(dirty, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if !confirmed.await {
+                return;
+            }
+            if let Err(error) = this.update_in(cx, |this, window, cx| then(this, window, cx)) {
+                log::warn!("view released before leaving the repository: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// Closes the open repository's tabs: its diffs and its files. The
+    /// tabs of other files and the settings stay.
+    fn leave_repository(&mut self, cx: &mut Context<Self>) {
+        let Some(repository) = self.repository.take() else {
+            return;
+        };
+        let gone: Vec<TabKey> = self
+            .editors
+            .group
+            .tabs()
+            .iter()
+            .filter(|key| match key {
+                TabKey::Diff { .. } => true,
+                TabKey::File(path) => path.starts_with(&repository.root),
+                TabKey::Settings => false,
+            })
+            .cloned()
+            .collect();
+        for key in &gone {
+            self.editors.close(key);
+        }
+        self.show_active_tab(cx);
+    }
+
     fn show_repository(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_repository(cx);
         window.set_window_title(&folder_name(&root));
         self.recent.record(&root);
         let diff = cx.new(|cx| {
@@ -389,20 +705,30 @@ impl Workbench {
                 .placeholder(commit_placeholder(None))
         });
         let diff_observation = cx.observe(&diff, |_, _, cx| cx.notify());
+        let watching = Self::watch(root.clone(), window, cx);
         self.repository = Some(Repository {
             root,
+            side_view: SideView::SourceControl,
+            explorer: Explorer::default(),
+            explorer_scroll: UniformListScrollHandle::new(),
+            explorer_collapsed: false,
+            decorations: Decorations::default(),
             diff,
+            shown_patch: None,
             message,
             load_state: LoadState::Loading,
             snapshot: None,
-            open: None,
             collapsed_groups: Vec::new(),
             operation: None,
             refresh_task: Task::ready(()),
+            _watching: watching,
             _diff_observation: diff_observation,
         });
         self.open_error = None;
+        // Files that were outside the old repository may be inside this one.
+        self.follow_outside_files(window, cx);
         self.refresh(window, cx);
+        self.read_folders(vec![String::new()], None, cx);
     }
 
     fn show_open_error(
@@ -412,18 +738,27 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         window.set_window_title(APP_NAME);
-        self.repository = None;
+        self.leave_repository(cx);
+        self.follow_outside_files(window, cx);
         self.open_error = Some(message);
         cx.notify();
     }
 
     fn close_folder(&mut self, _: &CloseFolder, window: &mut Window, cx: &mut Context<Self>) {
-        if self.repository.take().is_none() {
+        if self.repository.is_none() {
             return;
         }
-        window.set_window_title(APP_NAME);
-        self.open_error = None;
-        cx.notify();
+        self.after_unsaved_files(
+            |this, window, cx| {
+                this.leave_repository(cx);
+                this.follow_outside_files(window, cx);
+                window.set_window_title(APP_NAME);
+                this.open_error = None;
+                cx.notify();
+            },
+            window,
+            cx,
+        );
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -462,7 +797,7 @@ impl Workbench {
         match snapshot {
             Ok(None) => repository.load_state = LoadState::Loaded,
             Ok(Some(snapshot)) => {
-                let shown = repository.shown_patch();
+                let first = repository.snapshot.is_none();
                 let placeholder_changed =
                     repository.branch().map(|branch| &branch.head) != Some(&snapshot.branch.head);
                 // VS Code fills the commit field with git's merge message
@@ -482,19 +817,45 @@ impl Workbench {
                         .update(cx, |state, cx| state.set_value(message, window, cx));
                 }
                 repository.load_state = LoadState::Loaded;
+                repository.decorations = Decorations::of(&snapshot);
                 repository.snapshot = Some(snapshot);
-                if repository.open_file().is_none() {
-                    repository.open = repository.files().first().map(|changed| OpenFile {
-                        group: changed.group,
-                        path: changed.file.path().clone(),
-                    });
-                }
-                repository.show_open(shown, cx);
                 if placeholder_changed {
                     let placeholder = commit_placeholder(repository.branch());
                     repository.message.update(cx, |state, cx| {
                         state.set_placeholder(placeholder, window, cx)
                     });
+                }
+                // A diff tab whose file left its group has nothing to show.
+                let stale: Vec<TabKey> = self
+                    .editors
+                    .group
+                    .tabs()
+                    .iter()
+                    .filter(|key| match key {
+                        TabKey::Diff { group, path } => repository.file(*group, path).is_none(),
+                        TabKey::File(_) | TabKey::Settings => false,
+                    })
+                    .cloned()
+                    .collect();
+                for key in &stale {
+                    self.editors.close(key);
+                }
+                // The first file opens with the repository, and again when the
+                // closing above left no tab; not after the user closed them.
+                let emptied = !stale.is_empty() && self.editors.group.tabs().is_empty();
+                if (first || emptied)
+                    && let Some(changed) = repository.files().first()
+                {
+                    let key = TabKey::Diff {
+                        group: changed.group,
+                        path: changed.file.path().clone(),
+                    };
+                    self.editors.group.open(key, true);
+                }
+                self.show_active_tab(cx);
+                // The tabs changed under the user: show the new active file.
+                if first || !stale.is_empty() {
+                    self.reveal_active_file(cx);
                 }
             }
             Err(message) => repository.load_state = LoadState::Failed(message),
@@ -502,23 +863,320 @@ impl Workbench {
         cx.notify();
     }
 
-    fn open_change(&mut self, group: ChangeGroup, path: SharedString, cx: &mut Context<Self>) {
-        let Some(repository) = self.repository.as_mut() else {
-            return;
-        };
-        let shown = repository.shown_patch();
-        repository.open = Some(OpenFile { group, path });
-        repository.show_open(shown, cx);
+    /// Shows the active tab's content and scrolls its tab into view.
+    fn show_active_tab(&mut self, cx: &mut App) {
+        if let Some(repository) = self.repository.as_mut() {
+            repository.show_active_diff(self.editors.group.active(), cx);
+        }
+        self.editors.scroll_to_active();
+    }
+
+    /// The changed file of the active tab, when that is a diff tab.
+    fn active_diff(&self) -> Option<&ChangedFile> {
+        self.repository.as_ref()?.diff_of(self.editors.group.active())
+    }
+
+    /// The file tab of `path`, relative to the open repository's root.
+    fn file_key(&self, path: &str) -> Option<TabKey> {
+        let repository = self.repository.as_ref()?;
+        Some(TabKey::File(repository.root.join(path).into()))
+    }
+
+    /// Opens `key` in a tab, as a preview tab or for good, and shows it.
+    fn open_tab(&mut self, key: TabKey, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let TabKey::File(path) = &key
+            && !self.editors.buffers.contains_key(path)
+        {
+            let buffer = FileBuffer::open(path.clone(), window, cx);
+            let pinned = key.clone();
+            let subscriptions = [
+                cx.observe(&buffer, |_, _, cx| cx.notify()),
+                // VS Code keeps a preview tab once its file has unsaved edits.
+                cx.subscribe(&buffer, move |this, _, event, cx| match event {
+                    FileBufferEvent::Dirtied => {
+                        this.editors.group.pin(&pinned);
+                        cx.notify();
+                    }
+                }),
+            ];
+            self.editors.buffers.insert(
+                path.clone(),
+                OpenBuffer {
+                    buffer,
+                    _subscriptions: subscriptions,
+                },
+            );
+        }
+        // Opened for good, a file takes the keyboard, as in VS Code; a
+        // preview leaves it in the list it was opened from.
+        if !preview && let TabKey::File(path) = &key {
+            let buffer = self.editors.buffers[path].buffer.clone();
+            buffer.update(cx, |buffer, cx| buffer.focus(window, cx));
+        }
+        if let Opened::Replaced(replaced) = self.editors.group.open(key, preview) {
+            self.editors.tab_gone(&replaced);
+        }
+        self.show_active_tab(cx);
+        self.reveal_active_file(cx);
+        self.follow_outside_files(window, cx);
         cx.notify();
     }
 
-    fn close_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(repository) = self.repository.as_mut() else {
+    fn activate_tab(&mut self, key: &TabKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.editors.group.activate(key);
+        self.show_active_tab(cx);
+        self.focus_active_tab(window, cx);
+        self.reveal_active_file(cx);
+        cx.notify();
+    }
+
+    /// Hands the keyboard to the active tab's content, as VS Code does when
+    /// a tab is picked or takes over: a file's editor, the settings page, or
+    /// the window for a diff, which takes no keyboard. Left where it was,
+    /// it would stay with content no longer drawn, out of every key binding.
+    fn focus_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.editors.group.active() {
+            Some(TabKey::File(_)) => {
+                if let Some(buffer) = self.editors.active_buffer().cloned() {
+                    buffer.update(cx, |buffer, cx| buffer.focus(window, cx));
+                }
+            }
+            Some(TabKey::Settings) => {
+                if let Some(open) = &self.editors.settings {
+                    let focus = open.editor.focus_handle(cx);
+                    window.focus(&focus, cx);
+                }
+            }
+            Some(TabKey::Diff { .. }) | None => window.focus(&self.focus_handle, cx),
+        }
+    }
+
+    fn pin_tab(&mut self, key: &TabKey, cx: &mut Context<Self>) {
+        self.editors.group.pin(key);
+        cx.notify();
+    }
+
+    /// ⌘S: writes the active file tab back to its file.
+    fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabKey::File(path)) = self.editors.group.active().cloned() {
+            self.save_file(path, false, window, cx).detach();
+        }
+    }
+
+    /// Saves the file tab of `path`, reporting a failure; resolves to whether
+    /// the file was written.
+    fn save_file(
+        &mut self,
+        path: Arc<Path>,
+        overwrite: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let Some(buffer) = self
+            .editors
+            .buffers
+            .get(&path)
+            .map(|open| open.buffer.clone())
+        else {
+            return Task::ready(false);
+        };
+        let saving = buffer.update(cx, |buffer, cx| buffer.save(overwrite, cx));
+        cx.spawn_in(window, async move |this, cx| match saving.await {
+            Ok(()) => true,
+            Err(error) => {
+                let reported = this.update_in(cx, |this, window, cx| {
+                    this.report_save_error(path, error, window, cx)
+                });
+                if let Err(error) = reported {
+                    log::warn!("view released before a failed save was reported: {error:#}");
+                }
+                false
+            }
+        })
+    }
+
+    /// VS Code's notice for a failed save; a file changed on disk since it
+    /// was read offers to overwrite it.
+    fn report_save_error(
+        &mut self,
+        path: Arc<Path>,
+        error: SaveError,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = file_name(&path);
+        let notification = match error {
+            SaveError::Conflict => {
+                let workbench = cx.entity().downgrade();
+                Notification::error(format!(
+                    "无法保存“{name}”：文件内容较新。请用你的更改覆盖文件内容，或放弃保存。"
+                ))
+                .action(move |_, _, cx| {
+                    let workbench = workbench.clone();
+                    let path = path.clone();
+                    let notification = cx.entity().downgrade();
+                    Button::new("save-overwrite")
+                        .label("覆盖")
+                        .on_click(move |_, window, cx| {
+                            if let Some(notification) = notification.upgrade() {
+                                notification.update(cx, |notification, cx| {
+                                    notification.dismiss(window, cx)
+                                });
+                            }
+                            if let Some(workbench) = workbench.upgrade() {
+                                workbench.update(cx, |workbench, cx| {
+                                    workbench.save_file(path.clone(), true, window, cx).detach()
+                                });
+                            }
+                        })
+                })
+            }
+            SaveError::Io(reason) => {
+                Notification::error(format!("无法保存“{name}”：{reason}")).autohide(false)
+            }
+        };
+        window.push_notification(notification, cx);
+    }
+
+    /// ⌘Q: quits once the unsaved edits are saved or given up. Without a
+    /// window the app-wide handler quits at once.
+    fn quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        let confirmed = self.confirm_unsaved_files(window, cx);
+        cx.spawn(async move |_, cx| {
+            if confirmed.await {
+                cx.update(|cx| cx.quit());
+            }
+        })
+        .detach();
+    }
+
+    /// ⌘W: closes the active tab.
+    fn close_active_tab(&mut self, _: &CloseActiveTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(active) = self.editors.group.active().cloned() {
+            self.request_close_tab(active, window, cx);
+        }
+    }
+
+    /// Closes `key` at the user's request, first asking what to do with
+    /// unsaved edits, as VS Code does.
+    fn request_close_tab(&mut self, key: TabKey, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = match &key {
+            TabKey::File(path) => self
+                .editors
+                .buffers
+                .get(path)
+                .is_some_and(|open| open.buffer.read(cx).is_dirty(cx))
+                .then(|| path.clone()),
+            TabKey::Diff { .. } | TabKey::Settings => None,
+        };
+        let Some(path) = dirty else {
+            self.close_tab(&key, window, cx);
             return;
         };
-        let shown = repository.shown_patch();
-        repository.open = None;
-        repository.show_open(shown, cx);
+        let confirmed = self.confirm_unsaved(vec![path], window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmed.await
+                && let Err(error) =
+                    this.update_in(cx, |this, window, cx| this.close_tab(&key, window, cx))
+            {
+                log::warn!("view released before closing a tab: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// The files of the file tabs with unsaved edits, in tab order; only
+    /// those inside `within` when given.
+    fn dirty_files(&self, within: Option<&Path>, cx: &App) -> Vec<Arc<Path>> {
+        self.editors
+            .group
+            .tabs()
+            .iter()
+            .filter_map(|key| match key {
+                TabKey::File(path) => Some(path),
+                TabKey::Diff { .. } | TabKey::Settings => None,
+            })
+            .filter(|path| within.is_none_or(|within| path.starts_with(within)))
+            .filter(|path| {
+                self.editors
+                    .buffers
+                    .get(*path)
+                    .is_some_and(|open| open.buffer.read(cx).is_dirty(cx))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Asks what to do with the unsaved edits of `paths` before they are
+    /// dropped, with VS Code's dialogs: one file asks to save it, several
+    /// list them and offer to save all. Resolves to whether to go on: saved
+    /// (every save succeeded) or not saved, but not canceled.
+    fn confirm_unsaved(
+        &mut self,
+        paths: Vec<Arc<Path>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let answer = match paths.as_slice() {
+            [] => return Task::ready(true),
+            [path] => window.prompt(
+                PromptLevel::Warning,
+                &format!("是否要保存对“{}”的更改？", file_name(path)),
+                Some("如果不保存，你的更改将丢失。"),
+                &["保存", "不保存", "取消"],
+                cx,
+            ),
+            paths => {
+                let names: Vec<String> = paths.iter().map(|path| file_name(path)).collect();
+                window.prompt(
+                    PromptLevel::Warning,
+                    &format!("是否要保存对下列 {} 个文件的更改？", paths.len()),
+                    Some(&format!("{}\n\n如果不保存，你的更改将丢失。", names.join("\n"))),
+                    &["全部保存", "不保存", "取消"],
+                    cx,
+                )
+            }
+        };
+        cx.spawn_in(window, async move |this, cx| match answer.await {
+            Ok(0) => {
+                let saves = this.update_in(cx, |this, window, cx| {
+                    paths
+                        .into_iter()
+                        .map(|path| this.save_file(path, false, window, cx))
+                        .collect::<Vec<_>>()
+                });
+                let Ok(saves) = saves else {
+                    return false;
+                };
+                let mut saved = true;
+                for save in saves {
+                    saved &= save.await;
+                }
+                saved
+            }
+            Ok(1) => true,
+            _ => false,
+        })
+    }
+
+    /// Asks about every file tab with unsaved edits before they all go:
+    /// quitting, closing the window.
+    fn confirm_unsaved_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        let dirty = self.dirty_files(None, cx);
+        self.confirm_unsaved(dirty, window, cx)
+    }
+
+    /// Closes `key`. Closing the active tab hands the keyboard to the tab
+    /// that takes over.
+    fn close_tab(&mut self, key: &TabKey, window: &mut Window, cx: &mut Context<Self>) {
+        let was_active = self.editors.group.active() == Some(key);
+        self.editors.close(key);
+        self.show_active_tab(cx);
+        if was_active {
+            self.focus_active_tab(window, cx);
+            self.reveal_active_file(cx);
+        }
+        self.follow_outside_files(window, cx);
         cx.notify();
     }
 
@@ -719,12 +1377,6 @@ impl Workbench {
         self.group_files(group).iter().map(paths_of).collect()
     }
 
-    fn open_with_system(&mut self, path: SharedString, cx: &mut Context<Self>) {
-        if let Some(repository) = self.repository.as_ref() {
-            cx.open_with_system(&repository.root.join(path.as_str()));
-        }
-    }
-
     fn commit(
         &mut self,
         amend: bool,
@@ -762,7 +1414,7 @@ impl Workbench {
         }
         // Nothing staged: VS Code commits everything, asks first, or, told
         // never to ask, commits nothing.
-        let settings = *self.settings.values();
+        let settings = *SettingsStore::global(cx).values();
         if settings.enable_smart_commit {
             self.start_commit(message, false, true, after, window, cx);
             return;
@@ -782,13 +1434,12 @@ impl Workbench {
             let started = this.update_in(cx, |this, window, cx| match answer {
                 Ok(0) => this.start_commit(message, false, true, after, window, cx),
                 Ok(1) => {
-                    this.settings
-                        .update(|settings| settings.enable_smart_commit = true);
+                    // Remembered or not, this commit goes ahead.
+                    this.write_setting("git.enableSmartCommit", true.into(), window, cx);
                     this.start_commit(message, false, true, after, window, cx)
                 }
                 Ok(2) => {
-                    this.settings
-                        .update(|settings| settings.suggest_smart_commit = false);
+                    this.write_setting("git.suggestSmartCommit", false.into(), window, cx);
                     // Unstaged changes no longer count: the button disables.
                     cx.notify();
                 }
@@ -863,7 +1514,7 @@ impl Workbench {
             self.push(window, cx);
             return;
         };
-        if !self.settings.values().confirm_sync {
+        if !SettingsStore::global(cx).values().confirm_sync {
             self.start_sync(window, cx);
             return;
         }
@@ -882,8 +1533,7 @@ impl Workbench {
             let started = this.update_in(cx, |this, window, cx| match answer {
                 Ok(0) => this.start_sync(window, cx),
                 Ok(1) => {
-                    this.settings
-                        .update(|settings| settings.confirm_sync = false);
+                    this.write_setting("git.confirmSync", false.into(), window, cx);
                     this.start_sync(window, cx)
                 }
                 _ => {}
@@ -960,17 +1610,62 @@ impl Workbench {
         v_flex()
             .size_full()
             .child(
-                div().flex_1().min_h_0().child(
-                    h_resizable("workbench-panels")
-                        .child(
-                            resizable_panel()
-                                .size(px(300.))
-                                .child(self.render_scm_panel(repository, window, cx)),
-                        )
-                        .child(resizable_panel().child(self.render_editor(repository, cx))),
-                ),
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .children(self.render_activity_bar(repository, cx))
+                    .child(
+                        div().flex_1().min_w_0().h_full().child(
+                            h_resizable("workbench-panels")
+                                // One panel for either view, so switching
+                                // keeps the width.
+                                .child(resizable_panel().size(px(300.)).child(
+                                    self.render_side_bar(repository, window, cx),
+                                ))
+                                .child(
+                                    resizable_panel().child(self.render_editor(cx)),
+                                ),
+                        ),
+                    ),
             )
             .child(self.render_status_bar(repository, cx))
+    }
+}
+
+impl Workbench {
+    /// The side bar: the chosen view, above the activity bar's row when
+    /// that is at the bottom.
+    fn render_side_bar(
+        &self,
+        repository: &Repository,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (sidebar, sidebar_border) = {
+            let theme = cx.theme();
+            (theme.sidebar, theme.sidebar_border)
+        };
+        let view = match repository.side_view {
+            SideView::Explorer => self
+                .render_explorer(repository, window, cx)
+                .into_any_element(),
+            SideView::SourceControl => self
+                .render_scm_panel(repository, window, cx)
+                .into_any_element(),
+        };
+        let footer = self.render_activity_footer(repository, cx);
+        v_flex()
+            .size_full()
+            .child(div().flex_1().min_h_0().child(view))
+            .when_some(footer, |this, footer| {
+                this.child(
+                    div()
+                        .bg(sidebar)
+                        .border_r_1()
+                        .border_color(sidebar_border)
+                        .child(footer),
+                )
+            })
     }
 }
 
@@ -987,6 +1682,13 @@ impl Render for Workbench {
                 cx.listener(|this, _: &OpenFolder, window, cx| this.prompt_open_folder(window, cx)),
             )
             .on_action(cx.listener(Self::close_folder))
+            .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::quit))
+            .on_action(cx.listener(Self::close_active_tab))
+            .on_action(cx.listener(Self::open_user_settings_json))
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::show_explorer))
+            .on_action(cx.listener(Self::show_source_control))
             .on_action(cx.listener(|this, _: &Refresh, window, cx| this.refresh(window, cx)))
             .on_action(cx.listener(Self::open_terminal))
             .on_action(cx.listener(Self::about))
@@ -1051,7 +1753,7 @@ impl Render for Workbench {
             }))
             .map(|this| match self.repository.as_ref() {
                 Some(repository) => this.child(self.render_repository(repository, window, cx)),
-                None => this.child(self.render_welcome(cx)),
+                None => this.child(self.render_editor(cx)),
             })
             .when_some(self.quick_input.as_ref(), |this, (quick_input, _)| {
                 this.child(
@@ -1088,6 +1790,13 @@ fn commit_placeholder(branch: Option<&BranchStatus>) -> String {
         Some(Head::Branch(name)) => format!("消息(⌘Enter 在\"{name}\"提交)"),
         _ => "消息(⌘Enter 提交)".to_owned(),
     }
+}
+
+/// The last part of `path`, as dialogs and notices name a file.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn folder_name(root: &Path) -> String {

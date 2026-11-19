@@ -119,8 +119,27 @@ pub struct Snapshot {
     pub in_progress: Option<InProgress>,
     /// The message git prepared for the merge in progress.
     pub merge_message: Option<String>,
+    /// The paths git ignores, as it lists them: an ignored folder is one
+    /// entry ending in `/`, files inside it are not listed.
+    pub ignored: Vec<String>,
     /// Everything the snapshot was built from; equal keys mean nothing changed.
     pub key: Arc<str>,
+}
+
+impl Snapshot {
+    /// Whether git ignores `path` (relative to the root, `/`-separated):
+    /// listed itself, or inside an ignored folder.
+    pub fn is_ignored(&self, path: &str) -> bool {
+        self.ignored.iter().any(|ignored| match ignored.strip_suffix('/') {
+            Some(folder) => {
+                path == folder
+                    || path
+                        .strip_prefix(folder)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }
+            None => path == ignored,
+        })
+    }
 }
 
 /// Reads the repository, or `None` when it is exactly as `shown` describes.
@@ -132,6 +151,8 @@ pub fn load_snapshot(root: &Path, shown: Option<&str>) -> Result<Option<Snapshot
             "--branch",
             "-z",
             "--untracked-files=all",
+            // An ignored folder as one entry instead of every file in it.
+            "--ignored=matching",
         ]),
         &[0],
     )?;
@@ -177,6 +198,7 @@ pub fn load_snapshot(root: &Path, shown: Option<&str>) -> Result<Option<Snapshot
         files,
         in_progress,
         merge_message,
+        ignored: status.ignored,
         key,
     }))
 }
@@ -382,6 +404,7 @@ struct Status {
     branch: BranchStatus,
     untracked: Vec<String>,
     unmerged: Vec<String>,
+    ignored: Vec<String>,
 }
 
 /// Parses `git status --porcelain=v2 --branch -z`.
@@ -392,6 +415,7 @@ fn parse_status(output: &str) -> Status {
     let mut ahead_behind = None;
     let mut untracked = Vec::new();
     let mut unmerged = Vec::new();
+    let mut ignored = Vec::new();
     let mut dirty = false;
     let mut entries = output.split('\0').filter(|entry| !entry.is_empty());
     while let Some(entry) = entries.next() {
@@ -424,6 +448,7 @@ fn parse_status(output: &str) -> Status {
                 dirty = true;
                 untracked.push(entry[2..].to_owned());
             }
+            Some(b'!') => ignored.push(entry[2..].to_owned()),
             _ => {}
         }
     }
@@ -453,6 +478,7 @@ fn parse_status(output: &str) -> Status {
         },
         untracked,
         unmerged,
+        ignored,
     }
 }
 
@@ -854,5 +880,48 @@ mod tests {
             ]
         );
         assert!(file_sections("").is_empty());
+    }
+
+    #[test]
+    fn ignored_paths_are_listed_once_per_folder() {
+        let repository = new_repository();
+        let path = repository.path();
+        write(path, ".gitignore", "target/\n*.log\n");
+        commit_all(path);
+        write(path, "target/debug/deep/a.o", "");
+        write(path, "target/b.o", "");
+        write(path, "app.log", "");
+        write(path, "src/x.log", "");
+        write(path, "target2/kept.rs", "");
+
+        let snapshot = snapshot(path);
+        let mut ignored = snapshot.ignored.clone();
+        ignored.sort();
+        assert_eq!(ignored, ["app.log", "src/x.log", "target/"]);
+
+        assert!(snapshot.is_ignored("target"));
+        assert!(snapshot.is_ignored("target/debug/deep/a.o"));
+        assert!(snapshot.is_ignored("src/x.log"));
+        assert!(!snapshot.is_ignored("target2"));
+        assert!(!snapshot.is_ignored("target2/kept.rs"));
+        assert!(!snapshot.is_ignored("src"));
+        assert!(!snapshot.is_ignored("src/x.log.rs"));
+    }
+
+    /// Thousands of ignored files cost one status line, not one each.
+    #[test]
+    fn an_ignored_folder_costs_one_entry() {
+        let repository = new_repository();
+        let path = repository.path();
+        write(path, ".gitignore", "target/\n");
+        commit_all(path);
+        for ix in 0..5000 {
+            write(path, &format!("target/{}/{ix}.o", ix % 50), "");
+        }
+
+        let started = std::time::Instant::now();
+        let snapshot = snapshot(path);
+        println!("load_snapshot with 5000 ignored files: {:?}", started.elapsed());
+        assert_eq!(snapshot.ignored, ["target/"]);
     }
 }

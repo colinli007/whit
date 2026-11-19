@@ -123,6 +123,79 @@ pub mod colors {
     pub fn quick_input_background() -> Hsla {
         rgb(0x252526).into()
     }
+    /// `activityBar.background` of Monokai Dimmed.
+    pub fn activity_bar() -> Hsla {
+        rgb(0x353535).into()
+    }
+    /// `activityBar.foreground`: the active view's icon and its marker.
+    pub fn activity_bar_foreground() -> Hsla {
+        rgb(0xFFFFFF).into()
+    }
+    /// `activityBar.inactiveForeground`, VS Code's default of the foreground
+    /// at 40%.
+    pub fn activity_bar_inactive() -> Hsla {
+        rgba(0xFFFFFF66).into()
+    }
+    /// `activityBarTop.foreground`, VS Code's dark default: the active
+    /// view's icon and its line when the activity bar lies across the side
+    /// bar.
+    pub fn activity_bar_top_foreground() -> Hsla {
+        rgb(0xE7E7E7).into()
+    }
+    /// `activityBarTop.inactiveForeground`, the foreground at 60%.
+    pub fn activity_bar_top_inactive() -> Hsla {
+        rgba(0xE7E7E799).into()
+    }
+    /// `settings.headerForeground`: setting titles and group headings.
+    pub fn settings_header_foreground() -> Hsla {
+        rgb(0xE7E7E7).into()
+    }
+    /// `settings.rowHoverBackground`: `list.hoverBackground` at 30%.
+    pub fn settings_row_hover() -> Hsla {
+        rgba(0x4444444D).into()
+    }
+    /// `settings.focusedRowBackground`: `list.hoverBackground` at 60%.
+    pub fn settings_focused_row() -> Hsla {
+        rgba(0x44444499).into()
+    }
+    /// `settings.focusedRowBorder`, which is `focusBorder`.
+    pub fn focus_border() -> Hsla {
+        rgb(0x3655B5).into()
+    }
+    /// `settings.modifiedItemIndicator`, VS Code's dark default.
+    pub fn settings_modified() -> Hsla {
+        rgb(0x0C7D9D).into()
+    }
+    /// `settings.dropdownBackground` and its border, which follow
+    /// `dropdown.background` of Monokai Dimmed; checkboxes take the same.
+    pub fn settings_control() -> Hsla {
+        rgb(0x525252).into()
+    }
+    /// `dropdown.foreground`, VS Code's dark default.
+    pub fn settings_control_foreground() -> Hsla {
+        rgb(0xF0F0F0).into()
+    }
+    /// `settings.headerBorder`, which is `panel.border`.
+    pub fn settings_header_border() -> Hsla {
+        rgba(0x80808059).into()
+    }
+    /// `activityBarBadge.background` of Monokai Dimmed.
+    pub fn activity_badge() -> Hsla {
+        rgb(0x3655B5).into()
+    }
+    /// `gitDecoration.ignoredResourceForeground`.
+    pub fn ignored() -> Hsla {
+        rgb(0x8C8C8C).into()
+    }
+    /// `tree.indentGuidesStroke`.
+    pub fn tree_indent_guide() -> Hsla {
+        rgb(0x585858).into()
+    }
+    /// `sideBarSectionHeader.background` of Monokai Dimmed.
+    pub fn side_bar_section_header() -> Hsla {
+        rgb(0x505050).into()
+    }
+
     /// `widget.shadow`; dark themes draw no widget border.
     pub fn widget_shadow() -> Hsla {
         rgba(0x0000005C).into()

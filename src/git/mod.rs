@@ -93,6 +93,26 @@ pub fn repository_root(folder: &Path) -> Result<PathBuf, GitError> {
     Ok(PathBuf::from(root.trim_end_matches('\n')))
 }
 
+/// Git's folders for the repository at `root`: its own, and the one a
+/// linked working tree shares with the main one, when they differ.
+pub fn git_dirs(root: &Path) -> Result<Vec<PathBuf>, GitError> {
+    let output = run(
+        git_command(root).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ]),
+        &[0],
+    )?;
+    let mut dirs: Vec<PathBuf> = String::from_utf8_lossy(&output)
+        .lines()
+        .map(PathBuf::from)
+        .collect();
+    dirs.dedup();
+    Ok(dirs)
+}
+
 /// What every git command shares, whether it reads or writes.
 fn base_command(directory: &Path) -> Command {
     let mut command = Command::new("git");
@@ -296,5 +316,34 @@ mod tests {
                 .canonicalize()
                 .expect("canonical repository"),
         );
+    }
+
+    #[test]
+    fn a_linked_working_tree_has_two_git_folders() {
+        let repository = new_repository();
+        let path = repository.path();
+        fixtures::write(path, "a.txt", "a\n");
+        fixtures::commit_all(path);
+        let canonical = |path: &Path| path.canonicalize().expect("canonical path");
+        let main_git = canonical(&path.join(".git"));
+        let own: Vec<PathBuf> = git_dirs(path)
+            .expect("git folders")
+            .iter()
+            .map(|dir| canonical(dir))
+            .collect();
+        assert_eq!(own, std::slice::from_ref(&main_git));
+
+        let linked = tempfile::tempdir().expect("temporary directory");
+        let linked_path = linked.path().join("linked");
+        fixtures::git(
+            path,
+            &["worktree", "add", "--quiet", "-b", "side", linked_path.to_str().unwrap()],
+        );
+        let dirs: Vec<PathBuf> = git_dirs(&linked_path)
+            .expect("git folders")
+            .iter()
+            .map(|dir| canonical(dir))
+            .collect();
+        assert_eq!(dirs, [main_git.join("worktrees/linked"), main_git]);
     }
 }

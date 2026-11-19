@@ -90,6 +90,18 @@ impl Workbench {
                     })
             });
 
+        // VS Code's「行 12，列 5」for the editor with the cursor.
+        let cursor = self
+            .editors
+            .active_buffer()
+            .and_then(|buffer| buffer.read(cx).editor())
+            .map(|editor| {
+                let position = editor.read(cx).cursor_position();
+                let label: SharedString =
+                    format!("行 {}，列 {}", position.line + 1, position.character + 1).into();
+                item("status-cursor").aria_label(label.clone()).child(label)
+            });
+
         h_flex()
             .h(px(22.))
             .flex_none()
@@ -101,5 +113,7 @@ impl Workbench {
             .text_color(foreground)
             .children(branch)
             .children(sync)
+            .child(div().flex_1())
+            .children(cursor)
     }
 }

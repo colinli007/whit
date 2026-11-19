@@ -8,13 +8,14 @@ mod recent;
 mod settings;
 mod terminal;
 mod theme;
+mod watcher;
 mod workbench;
 
 use std::borrow::Cow;
 
 use gpui_kit::*;
 pub use recent::RecentFolders;
-pub use settings::Settings;
+pub use settings::SettingsStore;
 pub use workbench::Workbench;
 
 actions!(
@@ -25,7 +26,14 @@ actions!(
         CloseFolder,
         Refresh,
         OpenTerminal,
+        Save,
+        CloseActiveTab,
         Quit,
+        OpenUserSettingsJson,
+        OpenSettings,
+        FocusSettingsSearch,
+        ShowExplorer,
+        ShowSourceControl,
         Commit,
         CommitAmend,
         CommitAndPush,
@@ -57,13 +65,18 @@ pub const APP_NAME: &str = "Whit";
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
+        Braces,
         Cloud,
         CloudUpload,
         Columns2,
+        CopyMinus,
         FileSymlink,
+        Files,
+        Funnel,
         GitBranch,
         RefreshCw,
         Rows2,
+        Settings,
         Tag,
         Undo2,
         Unplug,
@@ -104,6 +117,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-r", Refresh, None),
         KeyBinding::new("cmd-j", OpenTerminal, None),
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-s", Save, None),
+        KeyBinding::new("cmd-w", CloseActiveTab, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new(
+            "cmd-f",
+            FocusSettingsSearch,
+            Some(workbench::SETTINGS_EDITOR_CONTEXT),
+        ),
+        KeyBinding::new("cmd-shift-e", ShowExplorer, None),
+        KeyBinding::new("ctrl-shift-g", ShowSourceControl, None),
         // Registered after the text field's own bindings, so in the commit
         // message it wins over the field's cmd-enter, which inserts a newline.
         KeyBinding::new("cmd-enter", Commit, Some(workbench::COMMIT_MESSAGE_CONTEXT)),
@@ -112,14 +135,23 @@ pub fn init(cx: &mut App) {
         Menu::new(APP_NAME).items([
             MenuItem::action("关于 Whit", About),
             MenuItem::separator(),
+            MenuItem::submenu(Menu::new("首选项").items([MenuItem::action("设置", OpenSettings)])),
+            MenuItem::separator(),
             MenuItem::action("退出", Quit),
         ]),
         Menu::new("文件").items([
             MenuItem::action("打开文件夹…", OpenFolder),
             MenuItem::action("关闭文件夹", CloseFolder),
             MenuItem::separator(),
+            MenuItem::action("保存", Save),
+            MenuItem::action("关闭编辑器", CloseActiveTab),
+            MenuItem::separator(),
             MenuItem::action("刷新", Refresh),
             MenuItem::action("在终端中打开", OpenTerminal),
+        ]),
+        Menu::new("查看").items([
+            MenuItem::action("资源管理器", ShowExplorer),
+            MenuItem::action("源代码管理", ShowSourceControl),
         ]),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());

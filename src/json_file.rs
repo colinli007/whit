@@ -26,19 +26,39 @@ pub fn read<T: DeserializeOwned>(file: &Path) -> Option<T> {
     }
 }
 
-/// Writes a temporary file and renames it over `file`, so a crash mid-write
-/// leaves the previous contents intact.
+/// Writes `value` over `file`; a failure is only logged.
 pub fn write<T: Serialize>(file: &Path, value: &T) {
-    let written = file
-        .parent()
-        .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| {
-            let temporary = file.with_extension("json.tmp");
-            let json = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-            fs::write(&temporary, json)?;
-            fs::rename(&temporary, file)
-        });
+    let written = serde_json::to_string_pretty(value)
+        .map_err(io::Error::other)
+        .and_then(|json| write_text(file, &json));
     if let Err(error) = written {
         log::warn!("cannot save {}: {error}", file.display());
+    }
+}
+
+/// Writes a temporary file and renames it over `file`, so a crash mid-write
+/// leaves the previous contents intact. A `file` that is a symbolic link
+/// (say into a dotfiles folder) stays one: its target is written.
+pub fn write_text(file: &Path, text: &str) -> io::Result<()> {
+    let target = fs::canonicalize(file).unwrap_or_else(|_| file.to_owned());
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = target.with_extension("json.tmp");
+    fs::write(&temporary, text)?;
+    fs::rename(&temporary, &target)
+}
+
+/// The real path of `path`, links resolved, as the file watcher names it;
+/// for a file not made yet, its folder's real path with its name.
+pub fn real_path(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(folder), Some(name)) => fs::canonicalize(folder)
+            .unwrap_or_else(|_| folder.to_owned())
+            .join(name),
+        _ => path.to_owned(),
     }
 }

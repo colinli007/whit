@@ -23,7 +23,7 @@ use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{TestSupportExt as _, prelude::FluentBuilder as _};
 use gpui_kit::{VisualTestAppContext, platform::current_platform, *};
 use tempfile::TempDir;
-use whit::{AppAssets, RecentFolders, Settings, Workbench};
+use whit::{AppAssets, RecentFolders, SettingsStore, Workbench};
 
 fn main() {
     let scenarios: &[(&str, fn())] = &[
@@ -33,6 +33,15 @@ fn main() {
         ("in_step_with_upstream", in_step_with_upstream),
         ("narrow_side_bar", narrow_side_bar),
         ("popups", popups),
+        ("stage_all_by_pointer", stage_all_by_pointer),
+        ("tabs_and_file_editor", tabs_and_file_editor),
+        ("changes_on_disk_show_up", changes_on_disk_show_up),
+        ("explorer_tree", explorer_tree),
+        ("edit_save_and_follow_the_disk", edit_save_and_follow_the_disk),
+        ("welcome_page", welcome_page),
+        ("settings_follow_the_file", settings_follow_the_file),
+        ("activity_bar_locations", activity_bar_locations),
+        ("settings_page", settings_page),
     ];
     for (name, scenario) in scenarios {
         println!("visual: {name}");
@@ -50,6 +59,19 @@ struct Visual {
 
 impl Visual {
     fn open(folder: &Path) -> Self {
+        Self::start(Some(folder.to_path_buf()))
+    }
+
+    /// The window with no folder open: the welcome page.
+    fn welcome() -> Self {
+        Self::start(None)
+    }
+
+    fn start(folder: Option<PathBuf>) -> Self {
+        Self::start_sized(folder, size(px(1280.), px(800.)))
+    }
+
+    fn start_sized(folder: Option<PathBuf>, window_size: Size<Pixels>) -> Self {
         let mut cx =
             VisualTestAppContext::with_asset_source(current_platform(false), Arc::new(AppAssets));
         cx.update(|cx| {
@@ -73,14 +95,15 @@ impl Visual {
         let recent = tempfile::tempdir().expect("temporary directory");
         let recent_file = recent.path().join("recent.json");
         let settings_file = recent.path().join("settings.json");
-        let folder = folder.to_path_buf();
         let (handle, _) = cx
             .update(|cx| {
+                cx.set_global(SettingsStore::load_from(Some(settings_file)));
+                SettingsStore::watch(cx);
                 gpui_kit::open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(Bounds {
                             origin: point(px(-10000.), px(-10000.)),
-                            size: size(px(1280.), px(800.)),
+                            size: window_size,
                         })),
                         focus: false,
                         show: true,
@@ -90,9 +113,8 @@ impl Visual {
                     |window, cx| {
                         cx.new(|cx| {
                             Workbench::new(
-                                Some(folder),
+                                folder,
                                 RecentFolders::load_from(Some(recent_file)),
-                                Settings::load_from(Some(settings_file)),
                                 window,
                                 cx,
                             )
@@ -164,6 +186,14 @@ impl Visual {
         self.settle();
     }
 
+    /// Moves the pointer to a window position.
+    fn move_to(&mut self, position: Point<Pixels>) {
+        self.window(|window, cx| window.render_frame(cx));
+        self.cx
+            .simulate_mouse_move(self.handle, position, None, Modifiers::default());
+        self.settle();
+    }
+
     fn hover(&mut self, id: &'static str) {
         self.window(|window, cx| {
             window.render_frame(cx);
@@ -195,11 +225,29 @@ impl Visual {
         })
     }
 
-    fn has(&mut self, id: &'static str) -> bool {
+    fn has(&mut self, id: impl Into<SharedString>) -> bool {
+        let id = id.into();
         self.window(|window, cx| {
             window.render_frame(cx);
             window.try_find(id).is_some()
         })
+    }
+
+    /// How many pixels of the code area, right of the side bar and below the
+    /// tabs, differ from its top-left one: none means it is blank.
+    fn drawn_code_pixels(&mut self) -> usize {
+        let image = self
+            .cx
+            .capture_screenshot(self.handle)
+            .expect("render to an image");
+        let scale = image.width() as f32 / 1280.;
+        let left = (420. * scale) as u32;
+        let top = (90. * scale) as u32;
+        let background = *image.get_pixel(left, top);
+        image
+            .enumerate_pixels()
+            .filter(|(x, y, pixel)| *x >= left && *y >= top && **pixel != background)
+            .count()
     }
 
     fn shot(&mut self, name: &str) {
@@ -276,6 +324,13 @@ impl Render for InWindowPrompt {
             .bg(rgba(0x00000066))
             .child(card)
     }
+}
+
+/// The element id of the file tab of `name` in `root`: tabs are keyed by
+/// the file's real path.
+fn file_tab(root: &Path, name: &str) -> String {
+    let root = root.canonicalize().expect("real path");
+    format!("tab-file-{}", root.join(name).display())
 }
 
 fn git(directory: &Path, arguments: &[&str]) {
@@ -503,4 +558,300 @@ fn popups() {
     visual.click("commit");
     visual.wait(Duration::from_millis(800));
     visual.shot("15-toast");
+}
+
+/// The pointer goes over the Changes header, rests on 「放弃所有更改」 until
+/// its tooltip shows, then moves on to 「+」 and clicks it: the file moves to
+/// 「暂存的更改」 and 「更改」 stays, empty, as VS Code shows it.
+fn stage_all_by_pointer() {
+    let repository = repository();
+    let path = repository.path();
+    let mut visual = Visual::open(path);
+    let center = |visual: &mut Visual, id: &'static str| {
+        visual.window(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds().center()
+        })
+    };
+    let header = center(&mut visual, "scm-group-changes");
+    visual.move_to(header);
+    let discard = center(&mut visual, "discard-all-changes");
+    visual.move_to(discard);
+    visual.wait(Duration::from_millis(1500));
+    visual.shot("16-discard-all-tooltip");
+    let stage = center(&mut visual, "stage-all-changes");
+    println!("  header {header:?} discard {discard:?} stage {stage:?}");
+    visual.move_to(stage);
+    visual.wait(Duration::from_millis(300));
+    visual.shot("17-over-stage-all");
+    visual.click_at(stage);
+    visual.wait(Duration::from_millis(300));
+    visual.shot("18-after-stage-all");
+    let status = Command::new("git")
+        .current_dir(path)
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git should run");
+    let status = String::from_utf8_lossy(&status.stdout).into_owned();
+    println!("  status {status:?}");
+    assert_eq!(status, "M  a.txt\n", "「+」 stages the changes");
+    assert!(
+        visual.has("scm-group-changes"),
+        "the emptied 「更改」 group stays as in VS Code"
+    );
+}
+
+/// A diff tab and a file tab side by side; going back to the diff from the
+/// file finds it drawn, not blank.
+fn tabs_and_file_editor() {
+    let repository = tempfile::tempdir().expect("temporary directory");
+    let path = repository.path();
+    git(path, &["init", "--quiet", "--initial-branch=main"]);
+    git(path, &["config", "user.name", "Test"]);
+    git(path, &["config", "user.email", "test@example.com"]);
+    git(path, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(path.join("Gallery.tsx"), GALLERY_TSX).unwrap();
+    git(path, &["add", "--all"]);
+    git(path, &["commit", "--quiet", "--message", "first"]);
+    std::fs::write(
+        path.join("Gallery.tsx"),
+        GALLERY_TSX.replace("size.height, true)", "size.height)"),
+    )
+    .unwrap();
+
+    let mut visual = Visual::open(path);
+    visual.hover("scm-file-changes-Gallery.tsx");
+    visual.click("open-changes-Gallery.tsx");
+    let gallery_tab = file_tab(path, "Gallery.tsx");
+    assert!(visual.has(gallery_tab.clone()), "the file tab opens");
+    // Opened for good, the file has the keyboard.
+    visual.type_text("// edited\n");
+    assert!(visual.has(format!("{gallery_tab}-dirty")), "unsaved edits show a dot");
+    visual.shot("19-file-tab");
+
+    visual.click("tab-changes-Gallery.tsx");
+    let drawn = visual.drawn_code_pixels();
+    println!("  diff pixels after switching back: {drawn}");
+    assert!(drawn > 10_000, "the diff is drawn after switching back");
+    visual.shot("20-back-to-diff");
+}
+
+/// A file written by someone else shows up in the changes within a second,
+/// with nothing done in the window: the real file watcher at work.
+fn changes_on_disk_show_up() {
+    let repository = repository();
+    let mut visual = Visual::open(repository.path());
+    assert!(visual.has("scm-file-changes-a.txt"));
+    // FSEvents starts reporting a moment after the stream opens.
+    visual.wait(Duration::from_millis(300));
+
+    std::fs::write(repository.path().join("b.txt"), "from the terminal\n").unwrap();
+    let started = std::time::Instant::now();
+    while !visual.has("scm-file-changes-b.txt") {
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the new file shows within a second"
+        );
+        visual.wait(Duration::from_millis(50));
+    }
+    println!("  shown after {:?}", started.elapsed());
+    visual.shot("21-changed-on-disk");
+}
+
+/// The explorer with git colors, an ignored folder and indent guides.
+fn explorer_tree() {
+    let repository = tempfile::tempdir().expect("temporary directory");
+    let path = repository.path();
+    git(path, &["init", "--quiet", "--initial-branch=main"]);
+    git(path, &["config", "user.name", "Test"]);
+    git(path, &["config", "user.email", "test@example.com"]);
+    git(path, &["config", "commit.gpgsign", "false"]);
+    let write = |name: &str, text: &str| {
+        let file = path.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    };
+    write(".gitignore", "target/\n");
+    write("Cargo.toml", "[package]\n");
+    write("README.md", "readme\n");
+    write("src/main.rs", "fn main() {}\n");
+    write("src/git/mod.rs", "mod read;\n");
+    write("src/git/read.rs", "// read\n");
+    git(path, &["add", "--all"]);
+    git(path, &["commit", "--quiet", "--message", "first"]);
+    write("src/git/read.rs", "// changed\n");
+    write("src/git/new.rs", "// new\n");
+    write("target/debug/out.o", "");
+
+    let mut visual = Visual::open(path);
+    visual.click("activity-explorer");
+    assert!(visual.has("explorer-src/git/read.rs"), "the first change is revealed");
+    visual.hover("explorer-src/git/new.rs");
+    visual.shot("22-explorer");
+}
+
+/// The whole flow of the change, off screen with the real file watcher: a
+/// preview from the explorer, kept by editing, saved into the changes,
+/// reloaded after a write elsewhere, a conflicting save overwritten, the
+/// file deleted, and quitting asking about unsaved edits.
+fn edit_save_and_follow_the_disk() {
+    let repository = tempfile::tempdir().expect("temporary directory");
+    let path = repository.path();
+    git(path, &["init", "--quiet", "--initial-branch=main"]);
+    git(path, &["config", "user.name", "Test"]);
+    git(path, &["config", "user.email", "test@example.com"]);
+    git(path, &["config", "commit.gpgsign", "false"]);
+    let notes = path.join("notes.txt");
+    std::fs::write(&notes, "one\ntwo\n").unwrap();
+    std::fs::write(path.join("other.txt"), "other\n").unwrap();
+    git(path, &["add", "--all"]);
+    git(path, &["commit", "--quiet", "--message", "first"]);
+
+    let mut visual = Visual::open(path);
+    visual.wait(Duration::from_millis(300));
+    visual.click("activity-explorer");
+    visual.click("explorer-notes.txt");
+    let notes_tab = file_tab(path, "notes.txt");
+    let notes_dirty = format!("{notes_tab}-dirty");
+    assert!(visual.has(notes_tab.clone()));
+    visual.shot("23-preview");
+
+    // Opened for good with the keyboard in the editor, then edited.
+    visual.press("cmd-down");
+    visual.type_text("hello ");
+    assert!(visual.has(notes_dirty.clone()));
+    visual.shot("24-edited");
+
+    visual.press("cmd-s");
+    visual.wait(Duration::from_millis(400));
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello one\ntwo\n");
+    assert!(!visual.has(notes_dirty.clone()));
+    assert_eq!(visual.label("activity-scm-badge").as_deref(), Some("1"), "saved into the changes");
+    visual.shot("25-saved");
+
+    // Written elsewhere while saved: reloaded without asking.
+    std::fs::write(&notes, "hello one\ntwo\nthree from the terminal\n").unwrap();
+    visual.wait(Duration::from_millis(400));
+    assert!(!visual.has(notes_dirty.clone()));
+    visual.shot("26-reloaded");
+
+    // Edited here and there: the save asks to overwrite.
+    visual.type_text("x");
+    std::fs::write(&notes, "theirs\n").unwrap();
+    visual.wait(Duration::from_millis(400));
+    visual.press("cmd-s");
+    visual.wait(Duration::from_millis(400));
+    assert!(visual.has("save-overwrite"), "the conflict offers to overwrite");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "theirs\n");
+    visual.shot("27-conflict");
+    visual.click("save-overwrite");
+    visual.wait(Duration::from_millis(400));
+    assert!(std::fs::read_to_string(&notes).unwrap().contains("three from the terminal"));
+    visual.shot("28-overwritten");
+
+    // Deleted elsewhere: the tab stays, struck through.
+    std::fs::remove_file(&notes).unwrap();
+    visual.wait(Duration::from_millis(400));
+    assert!(visual.has(notes_tab.clone()));
+    visual.shot("29-deleted");
+
+    // Unsaved edits make quitting ask; canceling keeps everything.
+    visual.type_text("y");
+    visual.press("cmd-q");
+    assert!(visual.has("prompt-保存"), "quitting asks about the unsaved file");
+    visual.shot("30-quit-asks");
+    visual.click("prompt-取消");
+    assert!(visual.has(notes_dirty.clone()));
+}
+
+/// The welcome page, drawn as the empty editor area of a window with no
+/// folder open.
+fn welcome_page() {
+    let mut visual = Visual::welcome();
+    assert!(visual.has("open-folder"));
+    assert!(!visual.has("activity-explorer"));
+    visual.shot("31-welcome");
+}
+
+/// The settings file written in the terminal takes effect in a running
+/// window within a second, through the real file watcher.
+fn settings_follow_the_file() {
+    let mut visual = Visual::welcome();
+    let file = visual._recent.path().join("settings.json");
+    let confirm_sync = |visual: &mut Visual| {
+        visual
+            .cx
+            .update(|cx| SettingsStore::global(cx).values().confirm_sync)
+    };
+    assert!(confirm_sync(&mut visual));
+    visual.wait(Duration::from_millis(300));
+
+    let written = std::time::Instant::now();
+    // Saved as an editor saves: another file renamed over it.
+    std::fs::write(file.with_extension("tmp"), "{ \"git.confirmSync\": false }").unwrap();
+    std::fs::rename(file.with_extension("tmp"), &file).unwrap();
+    while confirm_sync(&mut visual) && written.elapsed() < Duration::from_secs(1) {
+        visual.wait(Duration::from_millis(50));
+    }
+    println!("  applied after {:?}", written.elapsed());
+    assert!(!confirm_sync(&mut visual), "applied within a second");
+}
+
+/// The activity bar in each of its places, set through the settings file.
+fn activity_bar_locations() {
+    let repository = repository();
+    let mut visual = Visual::open(repository.path());
+    visual.wait(Duration::from_millis(300));
+    let file = visual._recent.path().join("settings.json");
+    for (location, shot) in [
+        ("default", "32-activity-bar-default"),
+        ("top", "33-activity-bar-top"),
+        ("bottom", "34-activity-bar-bottom"),
+        ("hidden", "35-activity-bar-hidden"),
+    ] {
+        std::fs::write(
+            &file,
+            format!("{{ \"workbench.activityBar.location\": \"{location}\" }}"),
+        )
+        .unwrap();
+        visual.wait(Duration::from_millis(400));
+        assert_eq!(visual.has("activity-manage"), location == "default", "{location}");
+        visual.shot(shot);
+    }
+}
+
+/// The settings page as VS Code 1.117 draws it: full width, narrow with no
+/// table of contents, filtered to the modified settings, and opened with
+/// no folder.
+fn settings_page() {
+    let repository = repository();
+    let mut visual = Visual::open(repository.path());
+    std::fs::write(
+        visual._recent.path().join("settings.json"),
+        "{\n    \"workbench.activityBar.location\": \"top\"\n}\n",
+    )
+    .unwrap();
+    visual.wait(Duration::from_millis(400));
+    visual.press("cmd-,");
+    assert!(visual.has("tab-settings"));
+    assert!(visual.has("settings-toc"));
+    visual.hover("setting-git.confirmSync");
+    visual.shot("36-settings");
+
+    visual.type_text("@modified");
+    visual.wait(Duration::from_millis(100));
+    assert_eq!(visual.label("settings-count").as_deref(), Some("找到 1 个设置"));
+    visual.shot("37-settings-modified");
+
+    // Narrower than VS Code's 700px, the table of contents goes.
+    let mut narrow = Visual::start_sized(None, size(px(650.), px(800.)));
+    narrow.press("cmd-,");
+    assert!(narrow.has("tab-settings"));
+    assert!(!narrow.has("settings-toc"));
+    narrow.shot("37b-settings-narrow");
+
+    let mut welcome = Visual::welcome();
+    welcome.press("cmd-,");
+    assert!(welcome.has("tab-settings"));
+    welcome.shot("38-settings-without-a-folder");
 }

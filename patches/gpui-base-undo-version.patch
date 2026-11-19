@@ -1,0 +1,407 @@
+--- a/src/input/base/undo_manager.rs
++++ b/src/input/base/undo_manager.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ use super::auto_close::AutoClosedPairs;
+ use crate::input::change::Change;
+ 
+@@ -16,6 +17,9 @@
+ 
+ #[derive(Debug)]
+ struct UndoTransaction {
++    /// The document version this transaction leaves behind. Coalescing a
++    /// further batch into it changes the document, so it takes a new one.
++    version: u64,
+     intent: EditIntent,
+     changes: Vec<Change>,
+     /// How many changes the most recently appended batch contributed. A batch
+@@ -38,6 +42,9 @@
+ /// matching `commit_transaction`.
+ #[derive(Debug)]
+ struct PendingTransaction {
++    /// The document version once its changes so far are applied; `None` until
++    /// the first change arrives.
++    version: Option<u64>,
+     intent: EditIntent,
+     changes: Vec<Change>,
+     selections_before: Option<Vec<CursorSelection>>,
+@@ -64,6 +71,11 @@
+ /// several already-bracketed edits into one undo entry.
+ #[derive(Debug)]
+ pub(crate) struct UndoManager {
++    /// The last document version handed out; versions are never reused.
++    last_version: u64,
++    /// The version of the document below every undo transaction: as loaded,
++    /// or as left by a transaction that fell off the bottom of the stack.
++    base_version: u64,
+     undo_transactions: Vec<UndoTransaction>,
+     redo_transactions: Vec<UndoTransaction>,
+     ignoring: bool,
+@@ -76,6 +88,8 @@
+ impl UndoManager {
+     pub(super) fn new() -> Self {
+         Self {
++            last_version: 0,
++            base_version: 0,
+             undo_transactions: Vec::new(),
+             redo_transactions: Vec::new(),
+             ignoring: false,
+@@ -86,6 +100,24 @@
+         }
+     }
+ 
++    /// The document's version, following VS Code's `alternativeVersionId`:
++    /// every edit makes a new one, and undo or redo returns to the version
++    /// the document had at that step. A file whose saved version equals the
++    /// current one has no unsaved edits, even after editing and undoing.
++    pub(super) fn version(&self) -> u64 {
++        if let Some(version) = self.pending.as_ref().and_then(|pending| pending.version) {
++            return version;
++        }
++        self.undo_transactions
++            .last()
++            .map_or(self.base_version, |transaction| transaction.version)
++    }
++
++    fn next_version(&mut self) -> u64 {
++        self.last_version += 1;
++        self.last_version
++    }
++
+     /// The intent requested for the next recorded change, taken by the edit
+     /// that records it.
+     pub(super) fn take_pending_intent(&mut self) -> Option<EditIntent> {
+@@ -109,9 +141,13 @@
+             return false;
+         }
+ 
+-        match self.pending.as_mut() {
+-            Some(pending) => pending.changes.push(change),
+-            None => self.push_batch(vec![change], intent),
++        if self.pending.is_some() {
++            let version = self.next_version();
++            let pending = self.pending.as_mut().expect("checked above");
++            pending.changes.push(change);
++            pending.version = Some(version);
++        } else {
++            self.push_batch(vec![change], intent);
+         }
+         true
+     }
+@@ -131,6 +167,7 @@
+         self.transaction_depth += 1;
+         if self.transaction_depth == 1 {
+             self.pending = Some(PendingTransaction {
++                version: None,
+                 intent,
+                 changes: Vec::new(),
+                 selections_before: None,
+@@ -186,6 +223,7 @@
+         }
+ 
+         self.redo_transactions.clear();
++        let version = self.next_version();
+         let can_coalesce = !self.coalescing_boundary
+             && intent != EditIntent::Atomic
+             && self.undo_transactions.last().is_some_and(|previous| {
+@@ -200,6 +238,7 @@
+                 .undo_transactions
+                 .last_mut()
+                 .expect("coalescing requires a previous transaction");
++            previous.version = version;
+             previous.last_batch_len = changes.len();
+             previous.recorded_changes += changes.len();
+             // Adjacent single-cursor keystrokes form one contiguous insertion.
+@@ -220,9 +259,11 @@
+         }
+ 
+         if self.undo_transactions.len() >= MAX_UNDO_TRANSACTIONS {
+-            self.undo_transactions.remove(0);
++            // Undoing everything now stops at the state this one left.
++            self.base_version = self.undo_transactions.remove(0).version;
+         }
+         self.undo_transactions.push(UndoTransaction {
++            version,
+             intent,
+             last_batch_len: changes.len(),
+             recorded_changes: changes.len(),
+@@ -329,7 +370,10 @@
+         }
+     }
+ 
++    /// Forget the history of a document that was replaced outright, which
++    /// makes it a new version no earlier step can return to.
+     pub(super) fn clear(&mut self) {
++        self.base_version = self.next_version();
+         self.undo_transactions.clear();
+         self.redo_transactions.clear();
+         self.transaction_depth = 0;
+@@ -597,5 +641,110 @@
+             [typing_change(0, &"a".repeat(MAX_CHANGES_PER_TRANSACTION))]
+         );
+         assert!(manager.undo().is_none());
++    }
++
++    fn backspace_change(offset: usize, removed: &str) -> Change {
++        Change::new(offset..offset + removed.len(), removed, offset..offset, "")
++    }
++
++    #[test]
++    fn undo_returns_to_the_earlier_version() {
++        let mut manager = UndoManager::new();
++        let loaded = manager.version();
++        manager.record_transaction(typing_change(0, "x"), EditIntent::Typing);
++        assert_ne!(manager.version(), loaded);
++
++        manager.undo();
++        assert_eq!(manager.version(), loaded);
+     }
++
++    #[test]
++    fn redo_returns_to_the_undone_version() {
++        let mut manager = UndoManager::new();
++        manager.record_transaction(typing_change(0, "x"), EditIntent::Typing);
++        manager.break_transaction_coalescing();
++        manager.record_transaction(typing_change(1, "y"), EditIntent::Typing);
++        let edited = manager.version();
++
++        manager.undo();
++        assert_ne!(manager.version(), edited);
++        manager.redo();
++        assert_eq!(manager.version(), edited);
++    }
++
++    #[test]
++    fn coalesced_typing_makes_a_new_version_per_keystroke() {
++        let mut manager = UndoManager::new();
++        manager.record_transaction(typing_change(0, "a"), EditIntent::Typing);
++        let after_a = manager.version();
++        manager.record_transaction(typing_change(1, "b"), EditIntent::Typing);
++        assert_eq!(manager.undo_count(), 1, "the keystrokes coalesce");
++        assert_ne!(manager.version(), after_a);
++    }
++
++    #[test]
++    fn typing_back_the_same_text_is_still_a_new_version() {
++        let mut manager = UndoManager::new();
++        let loaded = manager.version();
++        manager.record_transaction(typing_change(0, "x"), EditIntent::Typing);
++        manager.record_transaction(backspace_change(0, "x"), EditIntent::Backspace);
++        assert_ne!(manager.version(), loaded);
++    }
++
++    #[test]
++    fn a_boundary_keeps_later_typing_out_of_the_saved_step() {
++        let mut manager = UndoManager::new();
++        manager.record_transaction(typing_change(0, "abc"), EditIntent::Typing);
++        let saved = manager.version();
++        manager.break_transaction_coalescing();
++        manager.record_transaction(typing_change(3, "d"), EditIntent::Typing);
++
++        manager.undo();
++        assert_eq!(manager.version(), saved);
++    }
++
++    #[test]
++    fn an_open_transaction_already_has_its_own_version() {
++        let mut manager = UndoManager::new();
++        let loaded = manager.version();
++        manager.begin_transaction();
++        manager.record_transaction(typing_change(0, "a"), EditIntent::Typing);
++        let composing = manager.version();
++        assert_ne!(composing, loaded);
++        manager.commit_transaction();
++        assert_ne!(manager.version(), loaded);
++    }
++
++    #[test]
++    fn a_canceled_composition_keeps_the_version() {
++        let mut manager = UndoManager::new();
++        let loaded = manager.version();
++        manager.begin_transaction();
++        manager.record_transaction(typing_change(0, "a"), EditIntent::Typing);
++        manager.record_transaction(backspace_change(0, "a"), EditIntent::Backspace);
++        manager.commit_transaction();
++        assert_eq!(manager.version(), loaded);
++    }
++
++    #[test]
++    fn undoing_past_a_dropped_step_stops_at_its_version() {
++        let mut manager = UndoManager::new();
++        let loaded = manager.version();
++        manager.record_transaction(typing_change(0, "a"), EditIntent::Atomic);
++        let first = manager.version();
++        for offset in 1..=MAX_UNDO_TRANSACTIONS {
++            manager.record_transaction(typing_change(offset, "a"), EditIntent::Atomic);
++        }
++        while manager.undo().is_some() {}
++        assert_eq!(manager.version(), first);
++        assert_ne!(manager.version(), loaded);
++    }
++
++    #[test]
++    fn clearing_the_history_makes_a_new_version() {
++        let mut manager = UndoManager::new();
++        let loaded = manager.version();
++        manager.clear();
++        assert_ne!(manager.version(), loaded);
++    }
+ }
+--- a/src/input/base/state.rs
++++ b/src/input/base/state.rs
+@@ -1,3 +1,4 @@
++// Modified by Whit; its patches/ folder holds the changes.
+ //! A text input field that allows the user to enter text.
+ //!
+ //! Based on the `Input` example from the `gpui` crate.
+@@ -1324,7 +1325,80 @@
+ 
+         cx.notify();
+     }
++
++    /// The document's version, following VS Code's `alternativeVersionId`:
++    /// every edit makes a new one, and undo or redo returns to the version the
++    /// document had at that step. Compare it with the version at the last save
++    /// to tell whether there are unsaved edits.
++    pub fn version(&self) -> u64 {
++        self.undo_manager.version()
++    }
++
++    /// End the current undo step, so that the next edit starts a new one
++    /// instead of merging into it; call it on save, so that undoing what is
++    /// typed afterwards returns to the saved version.
++    pub fn break_undo_coalescing(&mut self) {
++        self.undo_manager.break_transaction_coalescing();
++    }
++
++    /// Apply `(byte range in the current document, replacement)` edits as one
++    /// undo step of its own, such as reloading a file that changed on disk.
++    ///
++    /// Unlike [`replace_all`](Self::replace_all), the cursors and the scroll
++    /// position stay where they are: each selection moves with the text
++    /// around it, and one inside a replaced range moves to the replacement.
++    pub fn apply_edits(
++        &mut self,
++        edits: &[(Range<usize>, String)],
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let version = self.version();
++        let selections: Vec<CursorSelection> = self.selections.iter().copied().collect();
++        self.undo_manager.break_transaction_coalescing();
++        self.replace_text_in_ranges(edits, window, cx);
++        self.undo_manager.break_transaction_coalescing();
+ 
++        let mut ascending: Vec<(Range<usize>, usize)> = edits
++            .iter()
++            .map(|(range, text)| (range.clone(), text.len()))
++            .collect();
++        ascending.sort_by_key(|(range, _)| range.start);
++        let map = |offset: usize| {
++            let mut shift = 0isize;
++            for (range, inserted) in &ascending {
++                if offset <= range.start {
++                    break;
++                }
++                if offset < range.end {
++                    let start = (range.start as isize + shift) as usize;
++                    return start + (offset - range.start).min(*inserted);
++                }
++                shift += *inserted as isize - range.len() as isize;
++            }
++            (offset as isize + shift) as usize
++        };
++        let len = self.text.len();
++        let moved: Vec<CursorSelection> = selections
++            .into_iter()
++            .map(|mut selection| {
++                selection.start = map(selection.start).min(len);
++                selection.end = map(selection.end).min(len);
++                selection.column_anchor = None;
++                selection
++            })
++            .collect();
++        if self.version() != version {
++            // The step's cursors for redo, in place of one per edit.
++            self.undo_manager
++                .record_selections(Vec::new(), moved.clone());
++        }
++        self.selections.replace_all(moved);
++        self.selections.merge_overlapping();
++        self.update_preferred_column();
++        cx.notify();
++    }
++
+     /// Perform `f` with the user-facing edit restrictions lifted.
+     ///
+     /// The `disabled` and `readonly` modes only reject the changes made by the
+@@ -8809,6 +8883,69 @@
+                 // Redo reapplies the replacement.
+                 state.redo(&Redo, window, cx);
+                 assert_eq!(state.value(), "second");
++            });
++        });
++    }
++
++    /// Typing after `break_undo_coalescing` is its own undo step, so undoing it
++    /// returns to the version at the break, which is what a save relies on.
++    #[gpui::test]
++    fn test_break_undo_coalescing_separates_later_typing(cx: &mut TestAppContext) {
++        let input_view = InputView::new(cx);
++        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
++        let input = input_view.input;
++
++        cx.update(|window, cx| {
++            input.update(cx, |state, cx| {
++                state.set_value("", window, cx);
++                let loaded = state.version();
++                state.replace_text_in_range(None, "abc", window, cx);
++                let saved = state.version();
++                assert_ne!(saved, loaded);
++
++                state.break_undo_coalescing();
++                state.replace_text_in_range(None, "d", window, cx);
++                assert_ne!(state.version(), saved);
++
++                state.undo(&Undo, window, cx);
++                assert_eq!(state.value(), "abc");
++                assert_eq!(state.version(), saved);
++            });
++        });
++    }
++
++    /// `apply_edits` is one undo step and leaves the cursor on the same text,
++    /// rather than one cursor per edit as typing at several cursors does.
++    #[gpui::test]
++    fn test_apply_edits_keeps_the_cursor_on_its_text(cx: &mut TestAppContext) {
++        let input_view = InputView::new(cx);
++        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
++        let input = input_view.input;
++
++        cx.update(|window, cx| {
++            input.update(cx, |state, cx| {
++                state.set_value("one\ntwo\nthree\n", window, cx);
++                let loaded = state.version();
++                // The cursor sits before `three`.
++                state.set_cursor_to(8);
++
++                // A line inserted above the cursor and one appended below it.
++                state.apply_edits(
++                    &[
++                        (4..4, "new\n".to_string()),
++                        (14..14, "four\n".to_string()),
++                    ],
++                    window,
++                    cx,
++                );
++                assert_eq!(state.value(), "one\nnew\ntwo\nthree\nfour\n");
++                assert_eq!(state.selections.len(), 1);
++                assert_eq!(state.cursor(), 12, "still before `three`");
++                assert_ne!(state.version(), loaded);
++
++                state.undo(&Undo, window, cx);
++                assert_eq!(state.value(), "one\ntwo\nthree\n");
++                assert_eq!(state.version(), loaded);
+             });
+         });
+     }

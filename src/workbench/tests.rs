@@ -1,7 +1,17 @@
 use super::*;
 
+mod activity_bar;
 mod branches;
+mod editor_area;
+mod explorer;
+mod file_buffer;
+mod outside_files;
 mod quick_input;
+mod settings;
+mod settings_editor;
+mod tabs;
+mod unsaved;
+mod watching;
 
 // `super::*` carries GPUI's `test` macro in through the `gpui_kit::*` glob;
 // `#[gpui_kit::test]` expands to `#[test]`, which must stay the built-in.
@@ -10,15 +20,26 @@ use core::prelude::v1::test;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::diff::{DiffLineRange, DiffSide};
 use gpui_kit::test::{TestAppContextExt as _, TestQueryExt as _, TestWindowExt as _};
+use editor::tab_id;
+use editor_group::TabKey;
 use scm_panel::file_row_id;
 use std::time::Duration;
 use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+fn diff_tab(group: ChangeGroup, path: &str) -> TabKey {
+    TabKey::Diff {
+        group,
+        path: path.to_owned().into(),
+    }
+}
+
 struct Harness {
     handle: AnyWindowHandle,
     view: Entity<Workbench>,
+    /// The folder opened at the start, as the repository names its files.
+    folder: Option<PathBuf>,
     /// Holds the recent-folder list, kept out of the user's own.
     _recent: TempDir,
 }
@@ -36,8 +57,10 @@ fn open_window_with_recent(
     let recent_file = recent.path().join("recent.json");
     // The settings of a test are not the user's either.
     let settings_file = recent.path().join("settings.json");
+    let opened = folder.as_deref().map(canonical);
     let (handle, view) = cx.update(|cx| {
         crate::init(cx);
+        cx.set_global(SettingsStore::load_from(Some(settings_file)));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: Point::default(),
@@ -50,7 +73,6 @@ fn open_window_with_recent(
                 Workbench::new(
                     folder,
                     RecentFolders::load_from(Some(recent_file)),
-                    crate::Settings::load_from(Some(settings_file)),
                     window,
                     cx,
                 )
@@ -61,11 +83,22 @@ fn open_window_with_recent(
     Harness {
         handle,
         view,
+        folder: opened,
         _recent: recent,
     }
 }
 
 impl Harness {
+    /// The file tab of `path`, relative to the folder opened at the start.
+    fn file_tab(&self, path: &str) -> TabKey {
+        TabKey::File(self.file_path(path))
+    }
+
+    fn file_path(&self, path: &str) -> Arc<Path> {
+        let folder = self.folder.as_ref().expect("a folder was opened");
+        folder.join(path).into()
+    }
+
     fn update<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&mut Window, &mut App) -> R) -> R {
         cx.update_window(self.handle, |_, window, cx| f(window, cx))
             .expect("window")
@@ -137,14 +170,13 @@ impl Harness {
         }
     }
 
-    /// Group and path of the file in the editor, and what the diff holds.
+    /// Group and path of the active diff tab, and what the diff holds.
     fn open(&self, cx: &mut TestAppContext) -> (Option<(ChangeGroup, String)>, Vec<String>) {
         self.view.read_with(cx, |view, cx| {
             let repository = view.repository.as_ref().expect("repository");
-            let open = repository
-                .open
-                .as_ref()
-                .map(|open| (open.group, open.path.to_string()));
+            let open = view
+                .active_diff()
+                .map(|changed| (changed.group, changed.file.path().to_string()));
             let diff = repository
                 .diff
                 .read(cx)
@@ -154,6 +186,17 @@ impl Harness {
                 .collect();
             (open, diff)
         })
+    }
+
+    /// The tabs in display order, by their element ids.
+    fn tabs(&self, cx: &mut TestAppContext) -> Vec<TabKey> {
+        self.view
+            .read_with(cx, |view, _| view.editors.group.tabs().to_vec())
+    }
+
+    fn active_tab(&self, cx: &mut TestAppContext) -> Option<TabKey> {
+        self.view
+            .read_with(cx, |view, _| view.editors.group.active().cloned())
     }
 
     fn label(&self, id: impl Into<ElementId>, cx: &mut TestAppContext) -> Option<String> {
@@ -330,8 +373,9 @@ async fn clean_repository_says_there_is_nothing_to_show(cx: &mut TestAppContext)
         harness.label("diff-message", cx).as_deref(),
         Some("没有未提交的改动")
     );
+    // As in VS Code, the working tree's group stays, empty, as 「更改 0」.
     harness.update(cx, |window, _| {
-        assert!(window.try_find("scm-group-changes").is_none());
+        assert!(window.try_find("scm-group-changes").is_some());
         assert!(window.try_find("scm-group-staged").is_none());
     });
 }
@@ -363,24 +407,18 @@ async fn a_partly_staged_file_opens_from_either_group(cx: &mut TestAppContext) {
         (Some((Staged, "a.txt".into())), vec!["a.txt".into()])
     );
     assert_eq!(
-        harness.label("editor-tab", cx).as_deref(),
+        harness.label(tab_id(&diff_tab(Staged, "a.txt")), cx).as_deref(),
         Some("a.txt (索引)")
     );
 
     harness.click(file_row_id(Changes, "a.txt"), cx);
     assert_eq!(harness.open(cx).0, Some((Changes, "a.txt".into())));
     assert_eq!(
-        harness.label("editor-tab", cx).as_deref(),
+        harness.label(tab_id(&diff_tab(Changes, "a.txt")), cx).as_deref(),
         Some("a.txt (工作树)")
     );
     let patch = harness.view.read_with(cx, |view, _| {
-        view.repository
-            .as_ref()
-            .unwrap()
-            .open_file()
-            .unwrap()
-            .patch
-            .clone()
+        view.active_diff().unwrap().patch.clone()
     });
     assert!(patch.contains("+ten") && !patch.contains("+one"));
 
@@ -397,12 +435,19 @@ async fn closing_the_tab_leaves_the_editor_empty(cx: &mut TestAppContext) {
     let harness = open_window(Some(repository.path().to_path_buf()), cx);
     harness.wait_for(&[(Changes, "a.txt")], cx).await;
 
-    harness.click("close-editor", cx);
+    let close = format!("{}-close", tab_id(&diff_tab(Changes, "a.txt")));
+    harness.click(SharedString::from(close), cx);
     assert_eq!(harness.open(cx), (None, vec![]));
+    assert!(harness.tabs(cx).is_empty());
     assert_eq!(
         harness.label("diff-message", cx).as_deref(),
-        Some("在左侧选择一个文件查看改动")
+        Some("在左侧选择一个文件")
     );
+    // Without a tab there are no breadcrumbs and no diff buttons.
+    harness.update(cx, |window, _| {
+        assert!(window.try_find("breadcrumbs").is_none());
+        assert!(window.try_find("toggle-inline").is_none());
+    });
 }
 
 #[gpui_kit::test]
@@ -427,30 +472,6 @@ async fn refresh_shortcut_reloads_the_changes(cx: &mut TestAppContext) {
 
     write(repository.path(), "b.txt", "new\n");
     harness.press("cmd-r", cx);
-
-    harness
-        .wait_for(&[(Changes, "a.txt"), (Changes, "b.txt")], cx)
-        .await;
-}
-
-#[gpui_kit::test]
-async fn returning_to_the_window_reloads_the_changes(cx: &mut TestAppContext) {
-    let repository = repository_with_changes(&["a.txt"]);
-    let harness = open_window(Some(repository.path().to_path_buf()), cx);
-    harness.wait_for(&[(Changes, "a.txt")], cx).await;
-    let activate = |cx: &mut TestAppContext| {
-        harness.update(cx, |window, _| window.activate_window());
-        cx.run_until_parked();
-    };
-
-    // Test windows open inactive; the app's window becomes active on launch,
-    // and that first activation is not a return from elsewhere.
-    write(repository.path(), "b.txt", "new\n");
-    activate(cx);
-    cx.update(|cx| assert_eq!(harness.loaded(cx).map(|files| files.len()), Some(1)));
-
-    VisualTestContext::from_window(harness.handle, cx).deactivate_window();
-    activate(cx);
 
     harness
         .wait_for(&[(Changes, "a.txt"), (Changes, "b.txt")], cx)
@@ -673,9 +694,7 @@ async fn always_commits_everything_from_then_on(cx: &mut TestAppContext) {
         git_output(path, &["log", "-1", "--format=%s"]).trim(),
         "first"
     );
-    harness.view.read_with(cx, |view, _| {
-        assert!(view.settings.values().enable_smart_commit)
-    });
+    cx.read(|cx| assert!(SettingsStore::global(cx).values().enable_smart_commit));
 
     // Nothing staged again: committed without asking.
     write(path, "b.txt", "b\n");
@@ -709,9 +728,7 @@ async fn never_commits_only_what_is_staged(cx: &mut TestAppContext) {
         git_output(path, &["rev-list", "--count", "HEAD"]).trim(),
         "1"
     );
-    harness.view.read_with(cx, |view, _| {
-        assert!(!view.settings.values().suggest_smart_commit)
-    });
+    cx.read(|cx| assert!(!SettingsStore::global(cx).values().suggest_smart_commit));
     // Unstaged changes no longer count as something to commit.
     assert!(harness.is_disabled("commit", cx));
     harness.press("cmd-enter", cx);
@@ -745,9 +762,7 @@ async fn dont_show_again_syncs_without_asking_from_then_on(cx: &mut TestAppConte
     cx.run_until_parked();
     harness.wait_until_idle(cx).await;
     sync_shows("0↓ 0↑", &harness, cx).await;
-    harness
-        .view
-        .read_with(cx, |view, _| assert!(!view.settings.values().confirm_sync));
+    cx.read(|cx| assert!(!SettingsStore::global(cx).values().confirm_sync));
 
     write(path, "b.txt", "b\n");
     commit_all(path);
@@ -1036,4 +1051,25 @@ async fn stage_commit_push_and_sync_back_end_to_end(cx: &mut TestAppContext) {
     .await;
     assert!(path.join("c.txt").exists());
     harness.wait_for(&[(Changes, "b.txt")], cx).await;
+}
+
+#[gpui_kit::test]
+async fn staging_all_from_the_group_header(cx: &mut TestAppContext) {
+    let repository = repository_with_changes(&["a.txt", "b.txt"]);
+    let path = repository.path();
+    let harness = open_window(Some(path.to_path_buf()), cx);
+    harness
+        .wait_for(&[(Changes, "a.txt"), (Changes, "b.txt")], cx)
+        .await;
+
+    harness.click_row_action("scm-group-changes".into(), "stage-all-changes", cx);
+    harness.wait_until_idle(cx).await;
+    harness
+        .wait_for(&[(Staged, "a.txt"), (Staged, "b.txt")], cx)
+        .await;
+    // The emptied group stays, so the files are seen to move out of it.
+    harness.update(cx, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("scm-group-changes").is_some());
+    });
 }

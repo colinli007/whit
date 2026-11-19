@@ -5,13 +5,25 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+# Hands the file watcher's batches from its thread to the window.
+async-channel = "2.5.0"
 dirs = "7.0.0"
 env_logger = "0.11.11"
 # The one-shot answer of a picker or input box to the flow awaiting it.
 futures-channel = "0.3.34"
 # Syntax highlighting in the diff: the bundled tree-sitter grammars.
 gpui-kit = { version = "=0.9.1", features = ["tree-sitter-languages"] }
+# settings.json as VS Code reads it (comments, trailing commas), and edited
+# key by key with its comments and layout kept. Zed's `settings_json` does the
+# same but is GPL.
+jsonc-parser = { version = "0.34.0", features = ["cst", "serde"] }
 libc = "0.2.191"
+# The explorer's VS Code order: case-insensitive, numbers compared by value.
+natord = "1.0.9"
+# Watches the repository (FSEvents on macOS) so edits made elsewhere show up.
+notify = "8.2.2"
+# Line diff for reloading a file changed on disk without moving the cursor.
+similar = "3.2.1"
 # The vscode-icons file icons, embedded in the binary.
 rust-embed = "8.14.0"
 log = "0.4.35"
@@ -53,3 +65,7 @@ signing-identity = "-"
 # in patches/gpui-component-split-scroll.patch for re-applying on upgrades.
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component" }
+# The editor's undo stack versioned by step (VS Code's alternativeVersionId),
+# which tells whether a file has unsaved edits; kept in
+# patches/gpui-base-undo-version.patch.
+gpui-base = { path = "vendor/gpui-base" }

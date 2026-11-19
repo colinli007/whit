@@ -365,9 +365,13 @@ fn push_run(runs: &mut Vec<Range<u32>>, range: Range<usize>, text: &str, unit: D
     runs.push(range.start as u32..range.end as u32);
 }
 
+/// The highlighter language the diff uses for the file at `path`, such as
+/// `rust`, or `text` for none; an editor showing the same file can use it to
+/// color the code the same way.
+///
 /// File paths may come from another platform. Only the final component
 /// determines the language; dots in a directory are not extensions.
-pub(crate) fn detected_language(path: &str) -> SharedString {
+pub fn detected_language(path: &str) -> SharedString {
     let name = path.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
     let language = match name.as_str() {
         "makefile" | "gnumakefile" => "make",

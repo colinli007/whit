@@ -15,6 +15,8 @@ pub(crate) struct FileIconAssets;
 #[serde(rename_all = "camelCase")]
 struct IconTable {
     file: String,
+    folder: String,
+    folder_expanded: String,
     file_names: HashMap<String, String>,
     file_extensions: HashMap<String, String>,
     language_file_names: HashMap<String, String>,
@@ -44,6 +46,17 @@ pub fn icon_for(path: &str) -> SharedString {
             table.language_ids.get(language)
         })
         .unwrap_or(&table.file);
+    format!("file-icons/{icon}").into()
+}
+
+/// The asset path of the explorer's folder icon, closed or open.
+pub fn folder_icon(expanded: bool) -> SharedString {
+    let table = &*TABLE;
+    let icon = if expanded {
+        &table.folder_expanded
+    } else {
+        &table.folder
+    };
     format!("file-icons/{icon}").into()
 }
 
@@ -79,12 +92,14 @@ mod tests {
         assert_eq!(icon_for(".gitignore"), "file-icons/file_type_git.svg");
         // Nothing matches.
         assert_eq!(icon_for("notes.unknownext"), "file-icons/default_file.svg");
+        assert_eq!(folder_icon(false), "file-icons/default_folder.svg");
+        assert_eq!(folder_icon(true), "file-icons/default_folder_opened.svg");
     }
 
     #[test]
     fn every_icon_in_the_table_is_bundled() {
         let table = &*TABLE;
-        let icons = [&table.file]
+        let icons = [&table.file, &table.folder, &table.folder_expanded]
             .into_iter()
             .chain(table.file_names.values())
             .chain(table.file_extensions.values())

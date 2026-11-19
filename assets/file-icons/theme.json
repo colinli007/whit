@@ -2071,6 +2071,8 @@
   "xo.config.ts": "file_type_xo.svg",
   "yarn.lock": "file_type_yarn.svg"
  },
+ "folder": "default_folder.svg",
+ "folderExpanded": "default_folder_opened.svg",
  "languageExtensions": {
   "*.log.?": "log",
   "agent.md": "chatagent",

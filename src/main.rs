@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::*;
-use whit::{APP_NAME, AppAssets, RecentFolders, Settings, Workbench, init};
+use whit::{APP_NAME, AppAssets, RecentFolders, SettingsStore, Workbench, init};
 
 fn main() {
     env_logger::init();
@@ -11,6 +11,8 @@ fn main() {
         .with_assets(AppAssets)
         .run(move |cx| {
             init(cx);
+            cx.set_global(SettingsStore::load());
+            SettingsStore::watch(cx);
             // Single-window app: once the window is gone there is nothing left to use.
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -32,7 +34,6 @@ fn main() {
                     Workbench::new(
                         initial_folder,
                         RecentFolders::load(),
-                        Settings::load(),
                         window,
                         cx,
                     )
