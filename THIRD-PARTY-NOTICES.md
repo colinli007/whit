@@ -74,7 +74,7 @@ Branded icons remain under their owners' copyright and trademarks.
 
 ## Codicons
 
-The action icons in `assets/codicons/icons` come from
+The icons in `assets/codicons/icons` come from
 [Codicons](https://github.com/microsoft/vscode-codicons) 0.0.46-24, VS Code's icon
 font, Copyright (c) Microsoft Corporation. The icons are licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) (`assets/codicons/LICENSE-codicons.txt`)

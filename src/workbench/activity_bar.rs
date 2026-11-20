@@ -3,7 +3,6 @@
 //! `workbench.activityBar.location` setting, as in VS Code 1.117: upright
 //! left of the side bar, across the side bar's title row, across a row at
 //! its bottom, or nowhere.
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon,
     button::{Button, ButtonVariants as _},
@@ -16,6 +15,7 @@ use gpui_kit::{TestSupportExt as _, prelude::FluentBuilder as _, *};
 use super::{Repository, SideView, Workbench};
 use crate::{
     OpenSettings, ShowExplorer, ShowSourceControl,
+    codicons::Codicon,
     settings::{ActivityBarLocation, SettingsStore},
     theme::colors,
 };
@@ -165,13 +165,13 @@ impl Workbench {
         let (id, icon, label, tooltip) = match view {
             SideView::Explorer => (
                 "activity-explorer",
-                Lucide::Files,
+                Codicon::Files,
                 "资源管理器",
                 "资源管理器 (⇧⌘E)",
             ),
             SideView::SourceControl => (
                 "activity-scm",
-                Lucide::GitBranch,
+                Codicon::SourceControl,
                 "源代码管理",
                 "源代码管理 (⌃⇧G)",
             ),
@@ -299,7 +299,7 @@ fn manage_button() -> AnyElement {
         .p_0()
         .text_color(colors::activity_bar_inactive())
         .tooltip("管理")
-        .child(Icon::new(Lucide::Settings).size(px(ICON_SIZE)))
+        .child(Icon::new(Codicon::SettingsGear).size(px(ICON_SIZE)))
         .dropdown_menu_with_anchor(Anchor::BottomLeft, |menu: PopupMenu, _, _| {
             menu.menu("设置", Box::new(OpenSettings))
         })

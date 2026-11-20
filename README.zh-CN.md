@@ -75,7 +75,7 @@ cargo run --release -- <仓库路径>
 
 ## 内置的 gpui-component 补丁
 
-`vendor/gpui-component` 是 gpui-component 0.9.1 的副本，通过 `Cargo.toml` 的 `[patch.crates-io]` 替换上游版本，许可证是 Apache 2.0（`vendor/gpui-component/LICENSE-APACHE`）。改动有七处：
+`vendor/gpui-component` 是 gpui-component 0.9.1 的副本，通过 `Cargo.toml` 的 `[patch.crates-io]` 替换上游版本，许可证是 Apache 2.0（`vendor/gpui-component/LICENSE-APACHE`）。改动有九处：
 
 - diff 组件不换行时，左右两栏各占一半宽度、在栏内裁切代码，所有行和两栏共用一个横向偏移同步滚动（和 VS Code 的并排 diff 一样）；上游是让每栏宽度等于最长一行，长行会把右栏挤出窗口。
 - 新增 `Diff::change_colors`，可以直接指定增删行和增删词的底色（用来对齐 VS Code 的 `diffEditor.*` 颜色）；上游只能用主题色乘固定透明度。
@@ -90,8 +90,10 @@ cargo run --release -- <仓库路径>
   - 主题的 `highlight.syntax` 可以写任意捕获名（如 `type.builtin`），找不到时逐级去掉后缀回退（`type.builtin` → `type`）；上游只认固定的 41 个名字，而且只回退到第一段。
   - JS/TS/TSX 高亮规则按 VS Code 的 TextMate 作用域细分：`new` / `typeof` 等是 `keyword.operator`，三元运算符、类型注解的冒号、`...` 是运算符，`number` 这类内置类型是 `type.builtin`，`new X()` 的 X 是 `constructor`，模板字符串 `${ }` 的两个括号都是 `punctuation.special`，JSX 组件标签是 `tag.component`、尖括号是 `tag.delimiter`、`{ }` 是 `punctuation.section.embedded`。
 - 菜单、按钮提示和通知按 VS Code 1.117 的尺寸绘制：上游用的是以 rem 计的预设，而主题字号 13 让 rem 也是 13px，预设整体比 VS Code 小。菜单为 13px 文字、24px 行高、6px 圆角、左右 26px 内边距、上下 4px 留白、分隔线 1px 上下各 5px（颜色是前景色的 20%，即 VS Code 的 `menu.separatorBackground`）、最小宽度 160px、外框 8px 圆角；提示为 12px 文字、19px 行高、2px 8px 内边距、5px 圆角；挂在组件上的提示（按钮等）照 VS Code 带指针的悬停框：默认显示在下方、离触发元素 1px、3px 圆角，并画出指向触发元素的小箭头（被窗口边缘推开时箭头仍对准触发元素）；通知为 13px 文字、22px 行高、10px 5px 内边距、18px 图标、4px 圆角（位置和宽度由应用在 `NotificationSettings` 里设）。
+- `diff::detected_language` 改为公开，文件编辑器按路径选高亮语言时和 diff 保持一致。
+- diff 的未改动行折叠条始终显示 `chevrons-up-down` 图标，Whit 把它画成 VS Code 的 `unfold` codicon（VS Code 在这里不论是否已部分展开都显示 `$(unfold)`）；上游在部分展开之前显示 `chevron-down`。
 
-前两处存成 `patches/gpui-component-split-scroll.patch`，第三处存成 `patches/gpui-component-highlight-locals.patch`，第四处存成 `patches/gpui-component-command-search-icon.patch`，第五处存成 `patches/gpui-component-jsx-highlights.patch`，第六处存成 `patches/gpui-component-vscode-editor.patch`（要在第五处之后打），第七处存成 `patches/gpui-component-vscode-popups.patch`。最后再打 `patches/gpui-component-modification-notices.patch`：按 Apache 2.0 的要求，在每个改过的文件开头注明已修改。升级 gpui-kit 时：把新版 gpui-component 复制到 `vendor/gpui-component`，在该目录依次执行 `patch -p1 < ../../patches/<补丁文件>`，冲突时手动合并，然后跑 `cargo test` 和组件自己的 diff 测试（`cargo test --lib diff::`；组件的单测引用了上游仓库里的图标和主题文件，单独跑时需要按上游仓库的目录结构摆放）。
+前两处存成 `patches/gpui-component-split-scroll.patch`，第三处存成 `patches/gpui-component-highlight-locals.patch`，第四处存成 `patches/gpui-component-command-search-icon.patch`，第五处存成 `patches/gpui-component-jsx-highlights.patch`，第六处存成 `patches/gpui-component-vscode-editor.patch`（要在第五处之后打），第七处存成 `patches/gpui-component-vscode-popups.patch`。最后再打 `patches/gpui-component-modification-notices.patch`：按 Apache 2.0 的要求，在每个改过的文件开头注明已修改。第八处 `patches/gpui-component-language-for-path.patch` 和第九处 `patches/gpui-component-unfold-icon.patch` 最后打。升级 gpui-kit 时：把新版 gpui-component 复制到 `vendor/gpui-component`，在该目录依次执行 `patch -p1 < ../../patches/<补丁文件>`，冲突时手动合并，然后跑 `cargo test` 和组件自己的 diff 测试（`cargo test --lib diff::`；组件的单测引用了上游仓库里的图标和主题文件，单独跑时需要按上游仓库的目录结构摆放）。
 
 ## 许可证
 

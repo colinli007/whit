@@ -1194,11 +1194,9 @@ fn render_fold(
         })
         .child(
             expand(("expand", pairs.start), FoldExpansion::All)
-                .icon(if partial {
-                    IconName::ChevronsUpDown
-                } else {
-                    IconName::ChevronDown
-                })
+                // VS Code's `$(unfold)`, partly shown or not; Whit draws
+                // this icon as that codicon.
+                .icon(IconName::ChevronsUpDown)
                 .label(t!("Diff.UnchangedLines", count = pairs.len()).to_string())
                 .accessibility_label(t!("Diff.ExpandLines", count = pairs.len()).to_string()),
         )

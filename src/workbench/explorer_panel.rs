@@ -2,9 +2,8 @@
 //! section, and its tree with git colors (`explorer`).
 use std::ops::Range;
 
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName,
+    ActiveTheme as _, Icon,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -15,7 +14,7 @@ use super::{
     editor_group::TabKey,
     explorer::{self, DirEntry, Row},
 };
-use crate::{file_icons, theme::colors};
+use crate::{codicons::Codicon, file_icons, theme::colors};
 
 const ROW_HEIGHT: f32 = 22.;
 /// `workbench.tree.indent`'s default.
@@ -78,9 +77,9 @@ impl Workbench {
             .cursor_pointer()
             .child(
                 Icon::new(if collapsed {
-                    IconName::ChevronRight
+                    Codicon::ChevronRight
                 } else {
-                    IconName::ChevronDown
+                    Codicon::ChevronDown
                 })
                 .size(px(16.)),
             )
@@ -99,7 +98,7 @@ impl Workbench {
                         .ghost()
                         .size(px(20.))
                         .p_0()
-                        .child(Icon::new(Lucide::CopyMinus).size(px(16.)))
+                        .child(Icon::new(Codicon::CollapseAll).size(px(16.)))
                         .tooltip("在资源管理器中折叠文件夹")
                         .on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
@@ -260,9 +259,9 @@ impl Workbench {
                     .when(is_dir, |this| {
                         this.child(
                             Icon::new(if row.expanded {
-                                IconName::ChevronDown
+                                Codicon::ChevronDown
                             } else {
-                                IconName::ChevronRight
+                                Codicon::ChevronRight
                             })
                             .size(px(16.)),
                         )

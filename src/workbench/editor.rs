@@ -1,8 +1,7 @@
 //! The editor area: the tabs, the active tab's path as breadcrumbs, and its
 //! content, a diff or a file to edit.
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffHunkSeparator, DiffMode},
     h_flex,
@@ -196,7 +195,7 @@ impl Workbench {
         let id = id.as_ref();
         let path = self.tab_path(key);
         let icon = match key {
-            TabKey::Settings => Icon::new(Lucide::Settings).size(px(16.)).into_any_element(),
+            TabKey::Settings => Icon::new(Codicon::Settings).size(px(16.)).into_any_element(),
             _ => img(file_icons::icon_for(&path))
                 .size(px(16.))
                 .flex_none()
@@ -222,7 +221,7 @@ impl Workbench {
             Button::new(SharedString::from(format!("{id}-close")))
                 .ghost()
                 .xsmall()
-                .icon(Icon::new(Lucide::X))
+                .icon(Icon::new(Codicon::Close))
                 .tooltip("关闭")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
@@ -535,7 +534,7 @@ fn render_breadcrumbs(path: &str, cx: &App) -> AnyElement {
                 })
                 .child(segment.to_owned())
                 .when(ix < last, |this| {
-                    this.child(Icon::new(IconName::ChevronRight).size(px(14.)))
+                    this.child(Icon::new(Codicon::ChevronRight).size(px(14.)))
                 })
         }))
         .into_any_element()

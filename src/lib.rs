@@ -62,48 +62,22 @@ actions!(
 
 pub const APP_NAME: &str = "Whit";
 
-// Icons beyond the component library's default set.
-gpui_kit::assets::icon_assets!(
-    ExtraIcons,
-    [
-        Cloud,
-        CloudUpload,
-        CopyMinus,
-        Files,
-        Funnel,
-        GitBranch,
-        RefreshCw,
-        Settings,
-        Tag,
-        Undo2,
-        Unplug,
-        X
-    ]
-);
-
-/// The component library's icons, the extra ones above, the codicons and
-/// the file icons.
+/// The file icons, the codicons, and the component library's own assets,
+/// its icons drawn as the codicons VS Code draws in their place.
 pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some(icon) = file_icons::FileIconAssets::get(path)
-            .or_else(|| codicons::CodiconAssets::get(path))
-        {
-            return Ok(Some(icon.data));
-        }
-        match ExtraIcons.load(path)? {
-            Some(bytes) => Ok(Some(bytes)),
+        let codicon = codicons::for_component_icon(path);
+        let path = codicon.as_deref().unwrap_or(path);
+        match file_icons::FileIconAssets::get(path).or_else(|| codicons::CodiconAssets::get(path)) {
+            Some(icon) => Ok(Some(icon.data)),
             None => gpui_kit::assets::Assets.load(path),
         }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut paths = gpui_kit::assets::Assets.list(path)?;
-        paths.extend(ExtraIcons.list(path)?);
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
+        gpui_kit::assets::Assets.list(path)
     }
 }
 

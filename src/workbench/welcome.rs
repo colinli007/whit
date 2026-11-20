@@ -1,10 +1,10 @@
 //! The page shown until a folder is open, after VS Code's welcome page: a
 //! "Start" column with Open and a "Recent" column of folders.
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
 use gpui_kit::{TestSupportExt as _, prelude::FluentBuilder as _, *};
 
 use super::Workbench;
-use crate::recent::display_parts;
+use crate::{codicons::Codicon, recent::display_parts};
 
 /// How many recent folders show before "More…".
 const RECENT_SHOWN: usize = 10;
@@ -25,7 +25,7 @@ impl Workbench {
                 .text_color(link)
                 .cursor_pointer()
                 .hover(|style| style.underline())
-                .child(Icon::new(IconName::FolderOpen).size(px(16.)))
+                .child(Icon::new(Codicon::FolderOpened).size(px(16.)))
                 .child("打开…")
                 .on_click(cx.listener(|this, _, window, cx| this.prompt_open_folder(window, cx))),
         );

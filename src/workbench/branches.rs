@@ -4,8 +4,7 @@
 //! that asks its questions in order and then runs git, as VS Code's commands do.
 use std::path::{Path, PathBuf};
 
-use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::{Icon, IconName, WindowExt as _, notification::Notification};
+use gpui_kit::component::{Icon, WindowExt as _, notification::Notification};
 use gpui_kit::*;
 
 use super::{
@@ -14,6 +13,7 @@ use super::{
     relative_time::{now, relative_time},
     report_failure,
 };
+use crate::codicons::Codicon;
 use crate::git::{self, GitError, Head, InProgress, RefKind, Reference, Remote};
 
 /// What a flow needs to know about the repository when it starts.
@@ -284,15 +284,15 @@ fn checkout_list(references: &[Reference], now: i64, detached: bool) -> PickList
     } else {
         vec![
             (
-                PickItem::new("创建新分支...").icon(IconName::Plus),
+                PickItem::new("创建新分支...").icon(Codicon::Add),
                 CheckoutChoice::CreateBranch,
             ),
             (
-                PickItem::new("创建新分支依据...").icon(IconName::Plus),
+                PickItem::new("创建新分支依据...").icon(Codicon::Add),
                 CheckoutChoice::CreateBranchFrom,
             ),
             (
-                PickItem::new("签出已分离…").icon(Icon::new(Lucide::Unplug)),
+                PickItem::new("签出已分离…").icon(Icon::new(Codicon::DebugDisconnect)),
                 CheckoutChoice::Detached,
             ),
         ]
@@ -378,9 +378,9 @@ fn reference_groups<T>(
 /// long ago it was committed, then author, hash and subject below.
 fn reference_item(reference: &Reference, now: i64) -> PickItem {
     let icon = match reference.kind {
-        RefKind::Local => Icon::new(Lucide::GitBranch),
-        RefKind::Remote { .. } => Icon::new(Lucide::Cloud),
-        RefKind::Tag => Icon::new(Lucide::Tag),
+        RefKind::Local => Icon::new(Codicon::GitBranch),
+        RefKind::Remote { .. } => Icon::new(Codicon::Cloud),
+        RefKind::Tag => Icon::new(Codicon::Tag),
     };
     let short = reference.short_commit();
     let mut parts = Vec::new();

@@ -1,8 +1,7 @@
 //! The Source Control side bar: title actions, the commit message and button,
 //! then the Merge Changes, Staged Changes and Changes groups.
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Textarea,
@@ -317,19 +316,19 @@ impl Workbench {
                     // `.action-item`'s 4px margin.
                     .gap(px(4.))
                     .child(
-                        icon_button("scm-commit", IconName::Check, TITLE_ACTION_SIZE, busy)
+                        icon_button("scm-commit", Codicon::Check, TITLE_ACTION_SIZE, busy)
                             .tooltip("提交 (⌘Enter)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.commit(false, super::AfterCommit::Nothing, window, cx)
                             })),
                     )
                     .child(
-                        icon_button("scm-refresh", Lucide::RefreshCw, TITLE_ACTION_SIZE, false)
+                        icon_button("scm-refresh", Codicon::Refresh, TITLE_ACTION_SIZE, false)
                             .tooltip("刷新")
                             .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
                     )
                     .child(
-                        icon_button("scm-more", IconName::Ellipsis, TITLE_ACTION_SIZE, false)
+                        icon_button("scm-more", Codicon::Ellipsis, TITLE_ACTION_SIZE, false)
                             .tooltip("更多操作…")
                             .dropdown_menu({
                                 let focus = focus.clone();
@@ -413,7 +412,7 @@ impl Workbench {
                 h_flex()
                     .w_full()
                     .child(
-                        text_button("commit", button_icon(IconName::Check), "提交")
+                        text_button("commit", button_icon(Codicon::Check), "提交")
                             .primary()
                             .flex_1()
                             .rounded_r_none()
@@ -441,7 +440,7 @@ impl Workbench {
                     .into_any_element()
             }
             ActionButton::Continue { unresolved } => {
-                text_button("continue", button_icon(IconName::Check), "继续")
+                text_button("continue", button_icon(Codicon::Check), "继续")
                     .primary()
                     .w_full()
                     .disabled(busy || unresolved)
@@ -452,7 +451,7 @@ impl Workbench {
             }
             ActionButton::Publish => text_button(
                 "publish-branch",
-                syncing_icon(Lucide::CloudUpload, repository.is_syncing()),
+                syncing_icon(Codicon::CloudUpload, repository.is_syncing()),
                 "发布分支",
             )
             .secondary()
@@ -463,7 +462,7 @@ impl Workbench {
             .into_any_element(),
             ActionButton::Sync { behind, ahead } => text_button(
                 "sync-changes",
-                syncing_icon(Lucide::RefreshCw, repository.is_syncing()),
+                syncing_icon(Codicon::Sync, repository.is_syncing()),
                 sync_label(behind, ahead),
             )
             .secondary()
@@ -507,9 +506,9 @@ impl Workbench {
             .hover(move |style| style.bg(list_hover))
             .child(
                 Icon::new(if collapsed {
-                    IconName::ChevronRight
+                    Codicon::ChevronRight
                 } else {
-                    IconName::ChevronDown
+                    Codicon::ChevronDown
                 })
                 .size(px(16.)),
             )
@@ -584,7 +583,7 @@ impl Workbench {
         let mut actions = Vec::new();
         match group {
             ChangeGroup::Staged => actions.push(
-                row_button(id("unstage-all"), IconName::Minus, "取消暂存所有更改", busy)
+                row_button(id("unstage-all"), Codicon::Remove, "取消暂存所有更改", busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.unstage(all_paths.clone(), window, cx)
@@ -596,7 +595,7 @@ impl Workbench {
                 actions.push(
                     row_button(
                         id("discard-all"),
-                        Icon::new(Lucide::Undo2),
+                        Codicon::Discard,
                         "放弃所有更改",
                         busy,
                     )
@@ -607,7 +606,7 @@ impl Workbench {
                     .into_any_element(),
                 );
                 actions.push(
-                    row_button(id("stage-all"), IconName::Plus, "暂存所有更改", busy)
+                    row_button(id("stage-all"), Codicon::Add, "暂存所有更改", busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.stage(all_paths.clone(), window, cx)
@@ -616,7 +615,7 @@ impl Workbench {
                 );
             }
             ChangeGroup::Merge => actions.push(
-                row_button(id("stage-all"), IconName::Plus, "暂存所有更改", busy)
+                row_button(id("stage-all"), Codicon::Add, "暂存所有更改", busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.stage(all_paths.clone(), window, cx)
@@ -763,7 +762,7 @@ impl Workbench {
         }
         match changed.group {
             ChangeGroup::Staged => actions.push(
-                row_button(id("unstage"), IconName::Minus, "取消暂存更改", busy)
+                row_button(id("unstage"), Codicon::Remove, "取消暂存更改", busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.unstage(vec![paths.clone()], window, cx)
@@ -773,7 +772,7 @@ impl Workbench {
             ChangeGroup::Changes => {
                 let file = changed.clone();
                 actions.push(
-                    row_button(id("discard"), Icon::new(Lucide::Undo2), "放弃更改", busy)
+                    row_button(id("discard"), Codicon::Discard, "放弃更改", busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.discard(vec![file.clone()], window, cx)
@@ -781,7 +780,7 @@ impl Workbench {
                         .into_any_element(),
                 );
                 actions.push(
-                    row_button(id("stage"), IconName::Plus, "暂存更改", busy)
+                    row_button(id("stage"), Codicon::Add, "暂存更改", busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.stage(vec![paths.clone()], window, cx)
@@ -790,7 +789,7 @@ impl Workbench {
                 );
             }
             ChangeGroup::Merge => actions.push(
-                row_button(id("stage"), IconName::Plus, "暂存更改", busy)
+                row_button(id("stage"), Codicon::Add, "暂存更改", busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.stage(vec![paths.clone()], window, cx)
@@ -847,7 +846,7 @@ fn button_icon(icon: impl Into<Icon>) -> AnyElement {
 fn syncing_icon(icon: impl Into<Icon>, syncing: bool) -> AnyElement {
     if syncing {
         Spinner::new()
-            .icon(Icon::new(Lucide::RefreshCw))
+            .icon(Icon::new(Codicon::Sync))
             .with_size(Size::Size(px(ICON_SIZE)))
             .into_any_element()
     } else {
@@ -877,7 +876,7 @@ fn menu_half(id: impl Into<ElementId>, disabled: bool, cx: &App) -> Button {
             h_flex()
                 .gap(px(4.))
                 .child(div().w(px(1.)).h(px(TEXT_BUTTON_HEIGHT - 8.)).bg(separator))
-                .child(button_icon(IconName::ChevronDown)),
+                .child(button_icon(Codicon::ChevronDown)),
         )
 }
 

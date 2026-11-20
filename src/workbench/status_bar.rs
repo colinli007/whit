@@ -1,6 +1,5 @@
 //! The status bar: the branch, and the sync entry with its incoming and
 //! outgoing commit counts.
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex};
 use gpui_kit::{
     Animation, TestSupportExt as _, Transformation, percentage, prelude::FluentBuilder as _, *,
@@ -8,7 +7,7 @@ use gpui_kit::{
 use std::time::Duration;
 
 use super::{Repository, Workbench};
-use crate::git::Head;
+use crate::{codicons::Codicon, git::Head};
 
 impl Workbench {
     pub(super) fn render_status_bar(
@@ -40,7 +39,7 @@ impl Workbench {
                 format!("{name}{}", if branch.dirty { "*" } else { "" }).into();
             item("status-branch")
                 .aria_label(label.clone())
-                .child(Icon::new(Lucide::GitBranch).size(px(14.)))
+                .child(Icon::new(Codicon::GitBranch).size(px(14.)))
                 .child(label)
                 .when(!busy, |this| {
                     this.cursor_pointer()
@@ -54,12 +53,12 @@ impl Workbench {
             .branch()
             .filter(|branch| matches!(branch.head, Head::Branch(_)))
             .map(|branch| {
-                let (icon, label): (Lucide, SharedString) = match &branch.upstream {
+                let (icon, label): (Codicon, SharedString) = match &branch.upstream {
                     Some(upstream) => (
-                        Lucide::RefreshCw,
+                        Codicon::Sync,
                         format!("{}↓ {}↑", upstream.behind, upstream.ahead).into(),
                     ),
-                    None => (Lucide::CloudUpload, "发布分支".into()),
+                    None => (Codicon::CloudUpload, "发布分支".into()),
                 };
                 // In step with its upstream, VS Code shows the icon alone; the
                 // counts stay in the accessible label.

@@ -6,9 +6,8 @@
 //!
 //! Sizes are VS Code's `settings-editor` styles. The settings are a static
 //! table walked on every render; there are four, so no virtual list.
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Escape, Input, InputEvent, InputState},
@@ -20,6 +19,7 @@ use serde_json::Value;
 
 use crate::{
     FocusSettingsSearch,
+    codicons::Codicon,
     settings::{Category, Kind, SETTINGS, SettingItem, SettingsStore},
     theme::colors,
 };
@@ -234,7 +234,7 @@ impl SettingsEditor {
         let filter = Button::new("settings-filter")
             .ghost()
             .xsmall()
-            .icon(Icon::new(Lucide::Funnel))
+            .icon(Icon::new(Codicon::Filter))
             .tooltip("筛选设置")
             .dropdown_menu(move |menu: PopupMenu, _, _| {
                 let editor = editor.clone();
@@ -367,7 +367,7 @@ impl SettingsEditor {
             .when(!selected, |this| this.opacity(0.9))
             .when(selected, |this| this.font_weight(FontWeight::BOLD))
             .when(depth == 0, |this| {
-                this.child(Icon::new(IconName::ChevronDown).size(px(16.)))
+                this.child(Icon::new(Codicon::ChevronDown).size(px(16.)))
             })
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| this.pick(category, cx)))
@@ -446,7 +446,7 @@ impl SettingsEditor {
                             .items_center()
                             .justify_center()
                             .when(checked, |this| {
-                                this.child(Icon::new(IconName::Check).size(px(14.)))
+                                this.child(Icon::new(Codicon::Check).size(px(14.)))
                             }),
                     )
                     .child(div().opacity(0.9).child(item.description))
@@ -540,7 +540,7 @@ impl SettingsEditor {
                     .size(px(GEAR_SIZE))
                     .p_0()
                     .tooltip("更多操作...")
-                    .child(Icon::new(Lucide::Settings).size(px(16.)))
+                    .child(Icon::new(Codicon::Gear).size(px(16.)))
                     .dropdown_menu(move |menu: PopupMenu, _, _| {
                         let reset = editor.clone();
                         let menu = if configured {
@@ -599,7 +599,7 @@ impl SettingsEditor {
                 h_flex()
                     .w_full()
                     .child(div().flex_1().child(current.clone()))
-                    .child(Icon::new(IconName::ChevronDown).size(px(16.))),
+                    .child(Icon::new(Codicon::ChevronDown).size(px(16.))),
             )
             .dropdown_menu(move |menu: PopupMenu, _, cx| {
                 let muted = cx.theme().muted_foreground;

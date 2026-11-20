@@ -10,7 +10,7 @@ Whit 是仿 VS Code 1.117「源代码管理」的 macOS git 客户端（查看�
 
 - **界面、交互、图标一律以 VS Code 为准**（本机安装的 VS Code 1.117）。尺寸、间距、颜色、行为都从 VS Code 源头查，不凭感觉近似：
   - 样式：`/Applications/Visual Studio Code.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.css`；命令、菜单、图标注册：同目录的 `workbench.desktop.main.js`；内置扩展（如 git）：`extensions/<名字>/package.json`。
-  - 图标用 VS Code 的 codicons：先查出 VS Code 在这个位置用的 codicon 名（如 `git.openFile` → `go-to-file`），把 `@vscode/codicons` 包里的 SVG 原样放进 `assets/codicons/icons`，再在 `src/codicons.rs` 的 `Codicon` 枚举里加一项。action 栏图标用 `icon.foreground`（#C5C5C5），禁用时透明度 0.6，都已经收在 `scm_panel.rs` 的 `icon_button` 里。
+  - 图标用 VS Code 的 codicons：先查出 VS Code 在这个位置用的 codicon 名（如 `git.openFile` → `go-to-file`），把 `@vscode/codicons` 包里的 SVG 原样放进 `assets/codicons/icons`，再在 `src/codicons.rs` 的 `Codicon` 枚举里加一项。组件库内部按名字画的 Lucide 图标（菜单勾选、通知、diff 折叠条等），由 `codicons.rs` 的 `COMPONENT_ICONS` 在加载时换成对应的 codicon，组件新用到一个图标就在表里补一行。代码里不要再直接用 Lucide。action 栏图标用 `icon.foreground`（#C5C5C5），禁用时透明度 0.6，都已经收在 `scm_panel.rs` 的 `icon_button` 里。
   - 颜色取 Monokai Dimmed 主题的值；主题没设的，用 VS Code 暗色默认值（放在 `src/theme.rs` 的 `colors`）。
   - 界面文字用简体中文，与装了中文语言包的 VS Code 一致。
 - **代码实现，尤其是性能相关的部分，参考 Zed**：渲染与重绘、虚拟列表、文件监听、git 调用、增量更新、后台任务等。参考时注明 Zed 的文件路径，只重写、不复制 GPL 许可的代码。
