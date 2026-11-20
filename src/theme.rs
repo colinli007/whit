@@ -94,6 +94,11 @@ pub mod colors {
     pub fn input_background() -> Hsla {
         rgb(0x3C3C3C).into()
     }
+    /// `icon.foreground`, VS Code's dark default, which Monokai Dimmed
+    /// keeps: the color of every action bar icon.
+    pub fn icon_foreground() -> Hsla {
+        rgb(0xC5C5C5).into()
+    }
     /// `badge.background`.
     pub fn badge_background() -> Hsla {
         rgb(0x4D4D4D).into()

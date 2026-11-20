@@ -1,6 +1,7 @@
 //! Whit: VS Code's Source Control view as a standalone app. The binary
 //! only opens the window; everything else lives here, so the off-screen
 //! screenshot tests in `tests/visual.rs` can drive the same window.
+mod codicons;
 mod file_icons;
 mod git;
 mod json_file;
@@ -65,17 +66,13 @@ pub const APP_NAME: &str = "Whit";
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        Braces,
         Cloud,
         CloudUpload,
-        Columns2,
         CopyMinus,
-        FileSymlink,
         Files,
         Funnel,
         GitBranch,
         RefreshCw,
-        Rows2,
         Settings,
         Tag,
         Undo2,
@@ -84,12 +81,15 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
-/// The component library's icons, the extra ones above and the file icons.
+/// The component library's icons, the extra ones above, the codicons and
+/// the file icons.
 pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some(icon) = file_icons::FileIconAssets::get(path) {
+        if let Some(icon) = file_icons::FileIconAssets::get(path)
+            .or_else(|| codicons::CodiconAssets::get(path))
+        {
             return Ok(Some(icon.data));
         }
         match ExtraIcons.load(path)? {

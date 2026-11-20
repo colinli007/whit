@@ -15,8 +15,14 @@ use super::{
     LoadState, Repository, Workbench,
     editor_group::{TabKey, display_path, home_dir},
     file_buffer::{Content, FileBuffer},
+    scm_panel::{TITLE_ACTION_SIZE, icon_button},
 };
-use crate::{file_icons, git::ChangeGroup, theme};
+use crate::{
+    codicons::Codicon,
+    file_icons,
+    git::{ChangeGroup, StatusLetter},
+    theme,
+};
 
 /// VS Code's notice for a file its editor cannot show.
 pub(super) const UNSUPPORTED_FILE: &str =
@@ -361,40 +367,44 @@ impl Workbench {
 
     fn render_diff_tools(&self, repository: &Repository, cx: &mut Context<Self>) -> AnyElement {
         let split = repository.diff.read(cx).mode() == DiffMode::Split;
-        h_flex()
-            .pr(px(8.))
-            .gap(px(2.))
+        // As on the change's row, a deleted file has nothing to open.
+        let open_path = repository
+            .diff_of(self.editors.group.active())
+            .filter(|changed| changed.letter != StatusLetter::Deleted)
+            .map(|changed| changed.file.path().clone());
+        editor_actions()
+            .when_some(open_path, |this, path| {
+                this.child(
+                    title_action("open-file", Codicon::GoToFile, "打开文件").on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.open_changed_file(&path, window, cx)
+                        }),
+                    ),
+                )
+            })
             .child(
-                Button::new("previous-change")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ArrowUp)
-                    .tooltip("上一处更改")
+                title_action("previous-change", Codicon::ArrowUp, "上一处更改")
                     .on_click(cx.listener(|this, _, _, cx| this.move_to_change(false, cx))),
             )
             .child(
-                Button::new("next-change")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ArrowDown)
-                    .tooltip("下一处更改")
+                title_action("next-change", Codicon::ArrowDown, "下一处更改")
                     .on_click(cx.listener(|this, _, _, cx| this.move_to_change(true, cx))),
             )
             .child(
-                Button::new("toggle-inline")
-                    .ghost()
-                    .small()
-                    .icon(Icon::new(if split {
-                        Lucide::Rows2
+                title_action(
+                    "toggle-inline",
+                    if split {
+                        Codicon::SplitVertical
                     } else {
-                        Lucide::Columns2
-                    }))
-                    .tooltip(if split {
+                        Codicon::SplitHorizontal
+                    },
+                    if split {
                         "切换为内联视图"
                     } else {
                         "切换为并排视图"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inline(cx))),
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_inline(cx))),
             )
             .into_any_element()
     }
@@ -433,21 +443,30 @@ pub(super) fn tab_id(key: &TabKey) -> SharedString {
     }
 }
 
-/// The settings tab's button: VS Code's 「打开设置(JSON)」 `{}`.
+/// The settings tab's button: VS Code's 「打开设置(JSON)」, its
+/// `preferences-open-settings` icon being `go-to-file`.
 fn render_settings_tools(cx: &mut Context<Workbench>) -> AnyElement {
-    h_flex()
-        .pr(px(8.))
+    editor_actions()
         .child(
-            Button::new("settings-open-json")
-                .ghost()
-                .small()
-                .icon(Icon::new(Lucide::Braces))
-                .tooltip("打开设置(JSON)")
-                .on_click(cx.listener(|this, _, window, cx| {
+            title_action("settings-open-json", Codicon::GoToFile, "打开设置(JSON)").on_click(
+                cx.listener(|this, _, window, cx| {
                     this.open_user_settings_json(&crate::OpenUserSettingsJson, window, cx)
-                })),
+                }),
+            ),
         )
         .into_any_element()
+}
+
+/// The tab bar's actions as VS Code lays out `.editor-actions`: `padding: 0
+/// 8px 0 4px`, and each `.action-item` with a 4px `margin-right`, the last
+/// one's adding to the 8px.
+fn editor_actions() -> Div {
+    h_flex().h_full().pl(px(4.)).pr(px(12.)).gap(px(4.))
+}
+
+/// One of them: a 16px icon in a 22px square, as in every VS Code title bar.
+fn title_action(id: &'static str, icon: impl Into<Icon>, tooltip: &'static str) -> Button {
+    icon_button(id, icon, TITLE_ACTION_SIZE, false).tooltip(tooltip)
 }
 
 /// A file tab's content: its editor, or why there is none.

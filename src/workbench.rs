@@ -882,6 +882,14 @@ impl Workbench {
         Some(TabKey::File(repository.root.join(path).into()))
     }
 
+    /// 「打开文件」 of a change: its file tab, `path` relative to the root,
+    /// opened for good to edit what is on disk.
+    fn open_changed_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(key) = self.file_key(path) {
+            self.open_tab(key, false, window, cx)
+        }
+    }
+
     /// Opens `key` in a tab, as a preview tab or for good, and shows it.
     fn open_tab(&mut self, key: TabKey, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let TabKey::File(path) = &key

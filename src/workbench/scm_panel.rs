@@ -18,6 +18,7 @@ use crate::{
     AbortMerge, AbortRebase, Checkout, Commit, CommitAmend, CommitAndPush, CommitAndSync,
     CreateBranch, CreateBranchFrom, DeleteBranch, DeleteRemoteBranch, DiscardAll, Fetch,
     MergeBranch, PublishBranch, Pull, Push, RebaseBranch, RenameBranch, StageAll, Sync, UnstageAll,
+    codicons::Codicon,
     file_icons,
     git::{ChangeGroup, ChangedFile, Head, InProgress, StatusLetter},
     settings::{self, SettingsStore},
@@ -35,7 +36,7 @@ const INSET_RIGHT: f32 = 11.;
 /// VS Code's codicons are 16px in every action bar and button.
 const ICON_SIZE: f32 = 16.;
 /// A title action: the codicon with `.action-label`'s 3px padding.
-const TITLE_ACTION_SIZE: f32 = 22.;
+pub(super) const TITLE_ACTION_SIZE: f32 = 22.;
 /// A row action: the codicon with the source control view's 2px padding.
 const ROW_ACTION_SIZE: f32 = 20.;
 /// The button under the message field as the user's VS Code draws it.
@@ -316,20 +317,19 @@ impl Workbench {
                     // `.action-item`'s 4px margin.
                     .gap(px(4.))
                     .child(
-                        icon_button("scm-commit", IconName::Check, TITLE_ACTION_SIZE)
+                        icon_button("scm-commit", IconName::Check, TITLE_ACTION_SIZE, busy)
                             .tooltip("提交 (⌘Enter)")
-                            .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.commit(false, super::AfterCommit::Nothing, window, cx)
                             })),
                     )
                     .child(
-                        icon_button("scm-refresh", Lucide::RefreshCw, TITLE_ACTION_SIZE)
+                        icon_button("scm-refresh", Lucide::RefreshCw, TITLE_ACTION_SIZE, false)
                             .tooltip("刷新")
                             .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
                     )
                     .child(
-                        icon_button("scm-more", IconName::Ellipsis, TITLE_ACTION_SIZE)
+                        icon_button("scm-more", IconName::Ellipsis, TITLE_ACTION_SIZE, false)
                             .tooltip("更多操作…")
                             .dropdown_menu({
                                 let focus = focus.clone();
@@ -750,15 +750,13 @@ impl Workbench {
             actions.push(
                 row_button(
                     id("open"),
-                    Icon::new(Lucide::FileSymlink),
+                    Codicon::GoToFile,
                     "打开文件",
                     false,
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    if let Some(key) = this.file_key(&path) {
-                        this.open_tab(key, false, window, cx)
-                    }
+                    this.open_changed_file(&path, window, cx)
                 }))
                 .into_any_element(),
             );
@@ -810,23 +808,35 @@ fn row_button(
     tooltip: &'static str,
     disabled: bool,
 ) -> Button {
-    icon_button(id, icon, ROW_ACTION_SIZE)
-        .tooltip(tooltip)
-        .disabled(disabled)
+    icon_button(id, icon, ROW_ACTION_SIZE, disabled).tooltip(tooltip)
 }
 
 fn row_actions(actions: Vec<AnyElement>) -> impl IntoElement {
     h_flex().flex_none().children(actions)
 }
 
-/// A VS Code action bar item: the 16px icon centered in a square. The icon
-/// goes in as a child, since `Button::icon` sizes it from the button's size.
-fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>, size: f32) -> Button {
+/// A VS Code action bar item: the 16px icon centered in a square, in
+/// `icon.foreground`, at 60% opacity when disabled (`.action-item.disabled
+/// .action-label.icon`). The icon goes in as a child, since `Button::icon`
+/// sizes it from the button's size; its own color also keeps the button's
+/// disabled color off it, hence the opacity.
+pub(super) fn icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<Icon>,
+    size: f32,
+    disabled: bool,
+) -> Button {
     Button::new(id)
         .ghost()
         .size(px(size))
         .p_0()
-        .child(button_icon(icon))
+        .disabled(disabled)
+        .when(disabled, |this| this.opacity(0.6))
+        .child(
+            icon.into()
+                .size(px(ICON_SIZE))
+                .text_color(colors::icon_foreground()),
+        )
 }
 
 fn button_icon(icon: impl Into<Icon>) -> AnyElement {

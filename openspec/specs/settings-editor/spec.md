@@ -42,7 +42,7 @@
   - 左侧是目录，默认宽 200 像素；右侧是设置列表。编辑区宽度小于 700 像素时，SHALL 隐藏目录。
   - 目录项：「工作台」下有「外观」，「扩展」下有「Git」。当前分类以粗体显示。
   - 点击目录项 SHALL 把列表滚动到该分类；滚动列表时，目录 SHALL 高亮当前可见的分类。
-- **标签栏右侧**：设置标签为当前标签时，标签栏右侧 SHALL 显示「打开设置(JSON)」按钮（`{}` 图标），点击后在编辑器中打开 `settings.json`，规则见 `file-editor` 的「多标签」。文件不存在时，SHALL 先以内容 `{` 换行 `}` 创建该文件再打开（VS Code 的 `createIfNotExists`），空对象不改变任何设置。
+- **标签栏右侧**：设置标签为当前标签时，标签栏右侧 SHALL 显示「打开设置(JSON)」按钮（VS Code 的 `go-to-file` codicon），点击后在编辑器中打开 `settings.json`，规则见 `file-editor` 的「多标签」。文件不存在时，SHALL 先以内容 `{` 换行 `}` 创建该文件再打开（VS Code 的 `createIfNotExists`），空对象不改变任何设置。
 
 #### Scenario: 目录跳转
 

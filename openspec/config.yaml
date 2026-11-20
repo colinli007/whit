@@ -2,7 +2,7 @@ schema: spec-driven
 
 context: |
   项目：Whit，一个 git 改动查看与提交的桌面应用。用户用 Claude/Codex CLI 写代码，需要一个快速查看改动、
-    并像 VS Code 源代码管理面板那样暂存、提交、推送的工具（参照 VS Code 1.117 的布局与交互，Dark Modern 深色配色）。
+    并像 VS Code 源代码管理面板那样暂存、提交、推送的工具（参照 VS Code 1.117 的布局与交互，Monokai Dimmed 深色配色）。
   功能边界：打开文件夹（含欢迎页与最近项目）→ 查看 git 改动（左右对照）→ 暂存 / 取消暂存 / 放弃更改 / 提交 / 拉取 / 推送 / 同步，
     以及 VS Code 的分支操作（签出、创建、重命名、删除、合并、变基、发布分支），交互基于 VS Code 式的快速选择框。
     目标是逐步对齐 VS Code 源代码管理「…」菜单的功能；储藏、标记、远程管理排在下一期，克隆、工作树不做。
@@ -21,6 +21,8 @@ context: |
       它的输入是 unified patch 文本，不自己算差异。
     - 读 git 数据：调用本机 git 命令（与 Zed 一致，保证和终端里 git 的结果一致、支持 reftable 等新特性），不用 gix / git2。
     - 打包：cargo-packager。
+  对齐原则：界面、交互和图标一律按 VS Code（尺寸、间距、颜色、行为从本机 VS Code 的 CSS / JS / 内置扩展里查，
+    图标用 VS Code 的 codicons）；代码实现，尤其是性能相关部分，参考 Zed。两者冲突时，效果按 VS Code，实现按 Zed。
   许可证：只参考 Zed 的做法，不复制 Zed 中 GPL 许可的代码（buffer_diff、editor、git、git_ui 等）。
   所有 OpenSpec 文档使用简体中文。
 

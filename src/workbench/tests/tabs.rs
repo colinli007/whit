@@ -115,6 +115,37 @@ async fn the_open_file_button_opens_an_editable_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn the_diff_tab_opens_its_file_from_the_tab_bar(cx: &mut TestAppContext) {
+    let repository = repository_with_changes(&["a.txt", "gone.txt"]);
+    fs::remove_file(repository.path().join("gone.txt")).unwrap();
+    let harness = open_window(Some(repository.path().to_path_buf()), cx);
+    harness.wait_for(&[(Changes, "a.txt"), (Changes, "gone.txt")], cx).await;
+
+    harness.click("open-file", cx);
+    cx.run_until_parked();
+    // The file tab opens beside the diff, kept and editable.
+    assert_eq!(
+        harness.tabs(cx),
+        [diff_tab(Changes, "a.txt"), harness.file_tab("a.txt")]
+    );
+    assert_eq!(harness.active_tab(cx), Some(harness.file_tab("a.txt")));
+    assert!(!harness.is_preview(&harness.file_tab("a.txt"), cx));
+    // A file tab has no button to open itself.
+    harness.update(cx, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("open-file").is_none());
+    });
+
+    // A deleted file has nothing to open.
+    harness.click(file_row_id(Changes, "gone.txt"), cx);
+    harness.update(cx, |window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("open-file").is_none());
+        assert!(window.try_find("toggle-inline").is_some());
+    });
+}
+
+#[gpui_kit::test]
 async fn editing_a_preview_keeps_it(cx: &mut TestAppContext) {
     let repository = repository_with_changes(&["a.txt", "b.txt"]);
     let harness = open_window(Some(repository.path().to_path_buf()), cx);
